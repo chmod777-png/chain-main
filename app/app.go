@@ -26,6 +26,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/server/api"
 	"github.com/cosmos/cosmos-sdk/server/config"
 	servertypes "github.com/cosmos/cosmos-sdk/server/types"
+	storetypes "github.com/cosmos/cosmos-sdk/store/types"
 	"github.com/cosmos/cosmos-sdk/testutil/testdata"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/module"
@@ -86,15 +87,15 @@ import (
 	"github.com/crypto-org-chain/chain-main/v2/x/chainmain"
 	chainmainkeeper "github.com/crypto-org-chain/chain-main/v2/x/chainmain/keeper"
 	chainmaintypes "github.com/crypto-org-chain/chain-main/v2/x/chainmain/types"
-	subscription "github.com/crypto-org-chain/chain-main/v2/x/subscription"
-	subscriptionkeeper "github.com/crypto-org-chain/chain-main/v2/x/subscription/keeper"
-	subscriptiontypes "github.com/crypto-org-chain/chain-main/v2/x/subscription/types"
+	"github.com/crypto-org-chain/chain-main/v2/x/nft"
+	nftkeeper "github.com/crypto-org-chain/chain-main/v2/x/nft/keeper"
+	nfttypes "github.com/crypto-org-chain/chain-main/v2/x/nft/types"
 	supply "github.com/crypto-org-chain/chain-main/v2/x/supply"
 	supplykeeper "github.com/crypto-org-chain/chain-main/v2/x/supply/keeper"
 	supplytypes "github.com/crypto-org-chain/chain-main/v2/x/supply/types"
 
 	// unnamed import of statik for swagger UI support
-	_ "github.com/cosmos/cosmos-sdk/client/docs/statik"
+	_ "github.com/crypto-org-chain/chain-main/v2/app/docs/statik"
 )
 
 const appName = "chain-maind"
@@ -125,8 +126,8 @@ var (
 		transfer.AppModuleBasic{},
 		vesting.AppModuleBasic{},
 		supply.AppModuleBasic{},
-		subscription.AppModuleBasic{},
 		chainmain.AppModuleBasic{},
+		nft.AppModuleBasic{},
 	)
 
 	// module account permissions
@@ -149,6 +150,8 @@ var (
 // ChainApp extends an ABCI application, but with most of its parameters exported.
 // They are exported for convenience in creating helper functions, as object
 // capabilities aren't needed for testing.
+// (Amino is still needed for Ledger at the moment)
+// nolint: staticcheck
 type ChainApp struct {
 	*baseapp.BaseApp
 	legacyAmino       *codec.LegacyAmino
@@ -163,22 +166,22 @@ type ChainApp struct {
 	memKeys map[string]*sdk.MemoryStoreKey
 
 	// keepers
-	AccountKeeper      authkeeper.AccountKeeper
-	BankKeeper         bankkeeper.Keeper
-	CapabilityKeeper   *capabilitykeeper.Keeper
-	StakingKeeper      stakingkeeper.Keeper
-	SlashingKeeper     slashingkeeper.Keeper
-	MintKeeper         mintkeeper.Keeper
-	DistrKeeper        distrkeeper.Keeper
-	GovKeeper          govkeeper.Keeper
-	UpgradeKeeper      upgradekeeper.Keeper
-	ParamsKeeper       paramskeeper.Keeper
-	IBCKeeper          *ibckeeper.Keeper // IBC Keeper must be a pointer in the app, so we can SetRouter on it correctly
-	EvidenceKeeper     evidencekeeper.Keeper
-	TransferKeeper     ibctransferkeeper.Keeper
-	chainmainKeeper    chainmainkeeper.Keeper
-	SupplyKeeper       supplykeeper.Keeper
-	SubscriptionKeeper subscriptionkeeper.Keeper
+	AccountKeeper    authkeeper.AccountKeeper
+	BankKeeper       bankkeeper.Keeper
+	CapabilityKeeper *capabilitykeeper.Keeper
+	StakingKeeper    stakingkeeper.Keeper
+	SlashingKeeper   slashingkeeper.Keeper
+	MintKeeper       mintkeeper.Keeper
+	DistrKeeper      distrkeeper.Keeper
+	GovKeeper        govkeeper.Keeper
+	UpgradeKeeper    upgradekeeper.Keeper
+	ParamsKeeper     paramskeeper.Keeper
+	IBCKeeper        *ibckeeper.Keeper // IBC Keeper must be a pointer in the app, so we can SetRouter on it correctly
+	EvidenceKeeper   evidencekeeper.Keeper
+	TransferKeeper   ibctransferkeeper.Keeper
+	chainmainKeeper  chainmainkeeper.Keeper
+	SupplyKeeper     supplykeeper.Keeper
+	NFTKeeper        nftkeeper.Keeper
 
 	// make scoped keepers public for test purposes
 	ScopedIBCKeeper      capabilitykeeper.ScopedKeeper
@@ -222,7 +225,7 @@ func New(
 		minttypes.StoreKey, distrtypes.StoreKey, slashingtypes.StoreKey,
 		govtypes.StoreKey, paramstypes.StoreKey, ibchost.StoreKey, upgradetypes.StoreKey,
 		evidencetypes.StoreKey, ibctransfertypes.StoreKey, capabilitytypes.StoreKey,
-		chainmaintypes.StoreKey, supplytypes.StoreKey, subscriptiontypes.StoreKey,
+		chainmaintypes.StoreKey, supplytypes.StoreKey, nfttypes.StoreKey,
 	)
 	tkeys := sdk.NewTransientStoreKeys(paramstypes.TStoreKey)
 	memKeys := sdk.NewMemoryStoreKeys(capabilitytypes.MemStoreKey)
@@ -282,7 +285,8 @@ func New(
 	)
 
 	app.SupplyKeeper = supplykeeper.NewKeeper(appCodec, keys[supplytypes.StoreKey], app.BankKeeper, app.AccountKeeper)
-	app.SubscriptionKeeper = subscriptionkeeper.NewKeeper(appCodec, keys[subscriptiontypes.StoreKey], app.GetSubspace(subscriptiontypes.ModuleName), app.BankKeeper)
+
+	app.NFTKeeper = nftkeeper.NewKeeper(appCodec, keys[nfttypes.StoreKey])
 
 	// Create IBC Keeper
 	app.IBCKeeper = ibckeeper.NewKeeper(
@@ -344,7 +348,7 @@ func New(
 		transferModule,
 		chainmain.NewAppModule(appCodec, app.chainmainKeeper),
 		supply.NewAppModule(appCodec, app.SupplyKeeper),
-		subscription.NewAppModule(appCodec, app.SubscriptionKeeper),
+		nft.NewAppModule(appCodec, app.NFTKeeper, app.AccountKeeper, app.BankKeeper),
 	)
 
 	// During begin block slashing happens after distr.BeginBlocker so that
@@ -353,7 +357,7 @@ func New(
 	// NOTE: staking module is required if HistoricalEntries param > 0
 	app.mm.SetOrderBeginBlockers(
 		upgradetypes.ModuleName, minttypes.ModuleName, distrtypes.ModuleName, slashingtypes.ModuleName,
-		evidencetypes.ModuleName, stakingtypes.ModuleName, ibchost.ModuleName, subscriptiontypes.ModuleName,
+		evidencetypes.ModuleName, stakingtypes.ModuleName, ibchost.ModuleName,
 	)
 	app.mm.SetOrderEndBlockers(govtypes.ModuleName, stakingtypes.ModuleName)
 
@@ -366,7 +370,7 @@ func New(
 		capabilitytypes.ModuleName, authtypes.ModuleName, banktypes.ModuleName, distrtypes.ModuleName, stakingtypes.ModuleName,
 		slashingtypes.ModuleName, govtypes.ModuleName, minttypes.ModuleName,
 		ibchost.ModuleName, genutiltypes.ModuleName, evidencetypes.ModuleName, ibctransfertypes.ModuleName,
-		chainmaintypes.ModuleName, supplytypes.ModuleName, subscriptiontypes.ModuleName,
+		chainmaintypes.ModuleName, supplytypes.ModuleName, nfttypes.ModuleName,
 	)
 
 	app.mm.RegisterRoutes(app.Router(), app.QueryRouter(), encodingConfig.Amino)
@@ -392,6 +396,7 @@ func New(
 		evidence.NewAppModule(app.EvidenceKeeper),
 		ibc.NewAppModule(app.IBCKeeper),
 		transferModule,
+		nft.NewAppModule(appCodec, app.NFTKeeper, app.AccountKeeper, app.BankKeeper),
 	)
 
 	app.sm.RegisterStoreDecoders()
@@ -412,6 +417,27 @@ func New(
 	)
 	app.SetEndBlocker(app.EndBlocker)
 
+	planName := "v2.0.0"
+	app.UpgradeKeeper.SetUpgradeHandler(planName, func(ctx sdk.Context, _ upgradetypes.Plan) {
+		// https://github.com/crypto-org-chain/chain-main/blob/master/doc/architecture/adr-003.md
+	})
+
+	upgradeInfo, err := app.UpgradeKeeper.ReadUpgradeInfoFromDisk()
+	if err != nil {
+		panic(err)
+	}
+
+	if upgradeInfo.Name == planName && !app.UpgradeKeeper.IsSkipHeight(upgradeInfo.Height) {
+		storeUpgrades := storetypes.StoreUpgrades{
+			Added:   []string{nfttypes.StoreKey},
+			Renamed: []storetypes.StoreRename{},
+			Deleted: []string{},
+		}
+
+		// configure store loader that checks if version == upgradeHeight and applies store upgrades
+		app.SetStoreLoader(upgradetypes.UpgradeStoreLoader(upgradeInfo.Height, &storeUpgrades))
+	}
+
 	if loadLatest {
 		if err := app.LoadLatestVersion(); err != nil {
 			tmos.Exit(err.Error())
@@ -430,10 +456,6 @@ func New(
 
 	app.ScopedIBCKeeper = scopedIBCKeeper
 	app.ScopedTransferKeeper = scopedTransferKeeper
-
-	app.UpgradeKeeper.SetUpgradeHandler("v2.0.0", func(ctx sdk.Context, _ upgradetypes.Plan) {
-		subscription.InitGenesis(ctx, app.SubscriptionKeeper, *subscriptiontypes.DefaultGenesis())
-	})
 
 	return app
 }
@@ -479,6 +501,8 @@ func (app *ChainApp) ModuleAccountAddrs() map[string]bool {
 //
 // NOTE: This is solely to be used for testing purposes as it may be desirable
 // for modules to register their own custom testing types.
+// (Amino is still needed for Ledger at the moment)
+// nolint: staticcheck
 func (app *ChainApp) LegacyAmino() *codec.LegacyAmino {
 	return app.legacyAmino
 }
@@ -583,6 +607,8 @@ func GetMaccPerms() map[string][]string {
 }
 
 // initParamsKeeper init params keeper and its subspaces
+// (Amino is still needed for Ledger at the moment)
+// nolint: staticcheck
 func initParamsKeeper(appCodec codec.BinaryMarshaler, legacyAmino *codec.LegacyAmino, key, tkey sdk.StoreKey) paramskeeper.Keeper {
 	paramsKeeper := paramskeeper.NewKeeper(appCodec, legacyAmino, key, tkey)
 
@@ -595,7 +621,6 @@ func initParamsKeeper(appCodec codec.BinaryMarshaler, legacyAmino *codec.LegacyA
 	paramsKeeper.Subspace(govtypes.ModuleName).WithKeyTable(govtypes.ParamKeyTable())
 	paramsKeeper.Subspace(ibctransfertypes.ModuleName)
 	paramsKeeper.Subspace(ibchost.ModuleName)
-	paramsKeeper.Subspace(subscriptiontypes.ModuleName)
 
 	return paramsKeeper
 }

@@ -6,7 +6,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
+	conf "github.com/cosmos/cosmos-sdk/client/config"
 	"github.com/imdario/mergo"
 	"github.com/spf13/cast"
 	"github.com/spf13/cobra"
@@ -51,13 +53,23 @@ func NewRootCmd() (*cobra.Command, params.EncodingConfig) {
 		WithLegacyAmino(encodingConfig.Amino).
 		WithInput(os.Stdin).
 		WithAccountRetriever(types.AccountRetriever{}).
-		WithBroadcastMode(flags.BroadcastBlock).
-		WithHomeDir(app.DefaultNodeHome)
+		WithHomeDir(app.DefaultNodeHome).
+		WithViper("CRO")
 
 	rootCmd := &cobra.Command{
 		Use:   "chain-maind",
 		Short: "Crypto.org Chain app",
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			// set the default command outputs
+			cmd.SetOut(cmd.OutOrStdout())
+			cmd.SetErr(cmd.ErrOrStderr())
+			initClientCtx = client.ReadHomeFlag(initClientCtx, cmd)
+
+			// nolint: govet
+			initClientCtx, err := conf.ReadFromClientConfig(initClientCtx)
+			if err != nil {
+				return err
+			}
 			if err := client.SetCmdClientContextHandler(initClientCtx, cmd); err != nil {
 				return err
 			}
@@ -75,6 +87,10 @@ func initRootCmd(rootCmd *cobra.Command, encodingConfig params.EncodingConfig) {
 	authclient.Codec = encodingConfig.Marshaler
 
 	initCmd := genutilcli.InitCmd(app.ModuleBasics, app.DefaultNodeHome)
+	initCmd.PreRun = func(cmd *cobra.Command, args []string) {
+		serverCtx := server.GetServerContextFromCmd(cmd)
+		serverCtx.Config.Consensus.TimeoutCommit = 3 * time.Second
+	}
 	initCmd.PostRunE = func(cmd *cobra.Command, args []string) error {
 		genesisPatch := map[string]interface{}{
 			"app_state": map[string]interface{}{
@@ -96,7 +112,7 @@ func initRootCmd(rootCmd *cobra.Command, encodingConfig params.EncodingConfig) {
 				"bank": map[string]interface{}{
 					"denom_metadata": []interface{}{
 						map[string]interface{}{
-							"description": "The native token of Crypto.org app.",
+							"description": "The native token of Crypto.org Chain.",
 							"denom_units": []interface{}{
 								map[string]interface{}{
 									"denom":    config.BaseCoinUnit,
@@ -168,6 +184,7 @@ func initRootCmd(rootCmd *cobra.Command, encodingConfig params.EncodingConfig) {
 		tmcli.NewCompletionCmd(rootCmd, true),
 		chainmaincli.AddTestnetCmd(app.ModuleBasics, banktypes.GenesisBalancesIterator{}),
 		debug.Cmd(),
+		conf.Cmd(),
 	)
 
 	server.AddCommands(rootCmd, app.DefaultNodeHome, newApp, exportAppStateAndTMValidators, addModuleInitFlags)

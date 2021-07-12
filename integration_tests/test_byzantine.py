@@ -6,7 +6,7 @@ import pytest
 
 from .utils import cluster_fixture
 
-MAX_SLEEP_SEC = 300
+MAX_SLEEP_SEC = 600
 
 
 @pytest.fixture(scope="module")
@@ -15,12 +15,12 @@ def cluster(worker_index, pytestconfig, tmp_path_factory):
     yield from cluster_fixture(
         Path(__file__).parent / "configs/byzantine.yaml",
         worker_index,
-        tmp_path_factory,
+        tmp_path_factory.mktemp("data"),
         quiet=pytestconfig.getoption("supervisord-quiet"),
     )
 
 
-@pytest.mark.slow
+@pytest.mark.byzantine
 def test_byzantine(cluster):
     """
     - 3 nodes

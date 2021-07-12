@@ -1,6 +1,6 @@
 PACKAGES=$(shell go list ./... | grep -v '/simulation')
 PACKAGE_NAME:=github.com/crypto-org-chain/chain-main
-GOLANG_CROSS_VERSION  = v1.16.1
+GOLANG_CROSS_VERSION  = v1.16.3
 
 
 VERSION := $(shell echo $(shell git describe --tags 2>/dev/null ) | sed 's/^v//')
@@ -38,7 +38,10 @@ BINDIR ?= ~/go/bin
 
 OS := $(shell uname)
 
-all: install
+all: download install
+
+download:
+	git submodule update --init --recursive
 
 install: check-network go.sum
 		go install -mod=readonly $(BUILD_FLAGS) $(BUILD_TAGS) ./cmd/chain-maind
@@ -150,7 +153,32 @@ make-proto:
 ###############################################################################
 # nix installation: https://nixos.org/download.html
 nix-integration-test: check-network make-proto
-	nix run -f ./. run-integration-tests -c run-integration-tests
+	nix run -f ./default.nix run-integration-tests -c run-integration-tests
+
+nix-integration-test-upgrade: check-network
+	nix run -f ./default.nix run-integration-tests -c run-integration-tests "pytest -v -m upgrade"	
+
+nix-integration-test-ledger: check-network 
+	nix run -f ./default.nix run-integration-tests-zemu -c run-integration-tests "pytest -v -m ledger"		
+
+nix-integration-test-slow: check-network 
+	nix run -f ./default.nix run-integration-tests -c run-integration-tests "pytest -v -m slow"
+
+nix-integration-test-ibc: check-network 
+	nix run -f ./default.nix run-integration-tests -c run-integration-tests "pytest -v -m ibc"
+
+nix-integration-test-byzantine: check-network
+	nix run -f ./default.nix run-integration-tests -c run-integration-tests "pytest -v -m byzantine"
+
+nix-integration-test-gov: check-network 
+	nix run -f ./default.nix run-integration-tests -c run-integration-tests "pytest -v -m gov"
+
+nix-integration-test-grpc: check-network make-proto
+	nix run -f ./default.nix run-integration-tests -c run-integration-tests "pytest -v -m grpc"
+
+nix-integration-test-all: check-network make-proto
+	nix run -f ./default.nix run-integration-tests -c run-integration-tests "pytest -v"
+
 
 nix-build-%: check-network check-os
 	@if [ -e ~/.nix/remote-build-env ]; then \
@@ -215,3 +243,16 @@ release:
 		-w /go/src/$(PACKAGE_NAME) \
 		troian/golang-cross:${GOLANG_CROSS_VERSION} \
 		release --rm-dist --skip-validate
+
+###############################################################################
+###                              Documentation                              ###
+###############################################################################
+
+# generate api swagger document
+document:
+	make all -f MakefileDoc
+
+# generate protobuf files
+# ./proto -> ./x
+proto-all:
+	make proto-all -f MakefileDoc

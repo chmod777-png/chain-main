@@ -1,12 +1,45 @@
 # Changelog
 
-*unreleased*
+*July 12, 2021*
+
+## v2.1.1
+This version is based on Cosmos SDK 0.42.7 which, among other changes, contains additional state sync-related fixes.
+
+*June 22, 2021*
+
+## v2.1.0
+This version is based on Cosmos SDK 0.42.6 and Tendermint 0.34.11 which, among other changes, contain state sync-related fixes.
+
+### Features
+- [565](https://github.com/crypto-org-chain/chain-main/pull/565) NFT module query denom by name
+
+*May 18, 2021*
+
+## v2.0.1
+This released version is the same as v2.0.0, but contains an upgrade-critical fix.
+NOTE that the upgrade plan name is still expected to be "v2.0.0".
+*WARNING*: please follow the upgrade instructions described here: https://crypto.org/docs/getting-started/upgrade_guide.html#the-canis-major-upgrade-guide-v1-to-v2-0-0
+
+### Bug Fixes
+- [552](https://github.com/crypto-org-chain/chain-main/pull/552) NFT module store initialized after upgrade
+
+*May 14, 2021*
 
 ## v2.0.0
+This pre-release version contains the scope of [ADR-003](https://github.com/crypto-org-chain/chain-main/blob/master/doc/architecture/adr-003.md) for the mainnet upgrade. It also upgrades to the latest version of Tendermint (0.34.10).
+*WARNING*: please follow the upgrade instructions described here: https://crypto.org/docs/getting-started/upgrade_guide.html#the-canis-major-upgrade-guide-v1-to-v2-0-0
 
 ### Breaking changes
-
-- [381](https://github.com/crypto-org-chain/chain-main/pull/381) Add subscription module
+- [516](https://github.com/crypto-org-chain/chain-main/pull/516) NFT module added
+### Features
+- [445](https://github.com/crypto-org-chain/chain-main/pull/445) aggregated tx history query command
+- [438](https://github.com/crypto-org-chain/chain-main/pull/438) multi-sign batch command exposed
+### Improvements
+- [536](https://github.com/crypto-org-chain/chain-main/pull/536) support for Arm64 (Linux and macOS)
+- [494](https://github.com/crypto-org-chain/chain-main/pull/494) default timeout_commit adjusted
+- [533](https://github.com/crypto-org-chain/chain-main/pull/533) Swagger UI contains chain-main API
+### Bug Fixes
+- [441](https://github.com/crypto-org-chain/chain-main/pull/441) fix for keyring on Linux
 
 *April 9, 2021*
 

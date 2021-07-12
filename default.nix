@@ -23,7 +23,7 @@ let
   lib = pkgs.lib;
   build-chain-maind = { ledger_zemu ? false, network ? "mainnet" }: pkgs.buildGoApplication rec {
     pname = "chain-maind";
-    version = "1.2.0";
+    version = "2.0.0";
     src = lib.cleanSourceWith {
       name = "src";
       src = lib.sourceByRegex ./. src_regexes;
@@ -65,17 +65,16 @@ let
   };
 in
 rec {
-  inherit (pkgs) relayer cosmovisor;
+  inherit (pkgs) hermes cosmovisor;
 
   chain-maind = build-chain-maind { };
-  pystarport = import ./pystarport { inherit pkgs; chaind = "${chain-maind}/bin/chain-maind"; };
+
+  pystarport = import ./pystarport { inherit pkgs; };
 
   chain-maind-testnet = build-chain-maind { network = "testnet"; };
 
   # for testing and dev
   chain-maind-zemu = build-chain-maind { ledger_zemu = true; };
-  # one can set binary with environment variable CHAIN_MAIND, or it'll find chain-maind in PATH
-  pystarport-unbind = import ./pystarport { inherit pkgs; };
 
   # python env for python linter tools and pytest
   test-pyenv = pkgs.poetry2nix.mkPoetryEnv { projectDir = ./integration_tests; };
@@ -100,7 +99,7 @@ rec {
   };
   common-env = [
     cosmovisor
-    relayer
+    hermes
   ];
 
   # sources for integration tests
@@ -133,10 +132,34 @@ rec {
     set -e
     export PATH=${ci-env}/bin:$PATH
     export TESTS=${tests_src}/integration_tests
-    pytest -v -n 3 -m 'not ledger and not upgrade' --dist loadscope $TESTS
-    pytest -v -m upgrade $TESTS
-    pytest -v -m ledger $TESTS
+    export PYTHONPATH=$PWD/pystarport/proto_python/:$PYTHONPATH
+    export CHAIN_MAIND="${chain-maind}/bin/chain-maind"
+    # check argument exists, then use it, otherwise use default
+    if [ -z $1 ]
+    then 
+      pytest -v -m 'not upgrade and not ledger and not slow and not ibc and not byzantine and not gov and not grpc' $TESTS
+    else 
+      $1 $TESTS
+    fi
   '';
+
+  run-integration-tests-zemu = pkgs.writeShellScriptBin "run-integration-tests" ''
+    set -e
+    export PATH=${ci-env}/bin:$PATH
+    export TESTS=${tests_src}/integration_tests
+    export PYTHONPATH=$PWD/pystarport/proto_python/:$PYTHONPATH
+    export CHAIN_MAIND="${chain-maind-zemu}/bin/chain-maind"
+    echo "CHAIN_MAIND="$CHAIN_MAIND
+    # check argument exists, then use it, otherwise use default
+    if [ -z $1 ]
+    then 
+      pytest -v -m 'not upgrade and not ledger and not slow and not ibc and not byzantine and not gov and not grpc' $TESTS
+    else 
+      $1 $TESTS
+    fi
+  '';
+
+
 
   ci-shell = pkgs.mkShell {
     buildInputs = [
@@ -154,7 +177,7 @@ rec {
       lint-env
       go
       python3Packages.poetry
-      pystarport-unbind
+      pystarport
     ] ++ common-env;
 
     shellHook = ''

@@ -11,6 +11,10 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "ledger: marks tests as ledger hardware test")
     config.addinivalue_line("markers", "grpc: marks grpc tests")
     config.addinivalue_line("markers", "upgrade: marks upgrade tests")
+    config.addinivalue_line("markers", "normal: marks normal tests")
+    config.addinivalue_line("markers", "ibc: marks ibc tests")
+    config.addinivalue_line("markers", "byzantine: marks byzantine tests")
+    config.addinivalue_line("markers", "gov: marks gov tests")
 
 
 def pytest_addoption(parser):
@@ -35,7 +39,7 @@ def cluster(worker_index, pytestconfig, tmp_path_factory):
     yield from cluster_fixture(
         Path(__file__).parent / "configs/default.yaml",
         worker_index,
-        tmp_path_factory,
+        tmp_path_factory.mktemp("data"),
         quiet=pytestconfig.getoption("supervisord-quiet"),
     )
 
