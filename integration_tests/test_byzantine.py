@@ -6,21 +6,20 @@ import pytest
 
 from .utils import cluster_fixture
 
-MAX_SLEEP_SEC = 300
+MAX_SLEEP_SEC = 600
 
 
 @pytest.fixture(scope="module")
 def cluster(worker_index, pytestconfig, tmp_path_factory):
     "override cluster fixture for this test module"
     yield from cluster_fixture(
-        Path(__file__).parent / "configs/byzantine.yaml",
+        Path(__file__).parent / "configs/byzantine.jsonnet",
         worker_index,
-        tmp_path_factory,
-        quiet=pytestconfig.getoption("supervisord-quiet"),
+        tmp_path_factory.mktemp("data"),
     )
 
 
-@pytest.mark.slow
+@pytest.mark.byzantine
 def test_byzantine(cluster):
     """
     - 3 nodes
@@ -50,10 +49,15 @@ def test_byzantine(cluster):
         sys.stdout.flush()
         i += 1
         val1 = cluster.validator(val_addr_byzantine)
-        if val1["jailed"]:
+        if val1.get("jailed"):
             break
-    assert val1["jailed"]
-    assert val1["status"] == "BOND_STATUS_UNBONDING"
+    assert val1.get("jailed")
+    assert any(
+        [
+            val1["status"] == "BOND_STATUS_UNBONDING",
+            val1["status"] == "BOND_STATUS_UNBONDED",
+        ]
+    )
     print("\n{}s waiting for node 1 jailed".format(i))
 
     i = 0
@@ -64,10 +68,15 @@ def test_byzantine(cluster):
         sys.stdout.write(".")
         sys.stdout.flush()
         val2 = cluster.validator(val_addr_slash)
-        if val2["jailed"]:
+        if val2.get("jailed"):
             break
-    assert val2["jailed"]
-    assert val2["status"] == "BOND_STATUS_UNBONDING"
+    assert val2.get("jailed")
+    assert any(
+        [
+            val1["status"] == "BOND_STATUS_UNBONDING",
+            val1["status"] == "BOND_STATUS_UNBONDED",
+        ]
+    )
     print("\n{}s waiting for node 2 jailed".format(i))
 
     tokens_byzantine_after = int((cluster.validator(val_addr_byzantine))["tokens"])

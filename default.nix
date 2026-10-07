@@ -1,5 +1,22 @@
-{ system ? builtins.currentSystem, pkgs ? import ./nix { inherit system; }, commit ? "" }:
+{
+  lib,
+  stdenv,
+  buildGoApplication,
+  nix-gitignore,
+  writeShellScript,
+  buildPackages,
+  coverage ? false, # https://tip.golang.org/doc/go1.20#cover
+  gomod2nix,
+  rocksdb ? null,
+  sectrustShim ? null,
+  network ? "mainnet", # mainnet|testnet
+  rev ? "dirty",
+  ledger_zemu ? false,
+  static ? stdenv.hostPlatform.isStatic,
+  nativeByteOrder ? true, # nativeByteOrder mode will panic on big endian machines
+}:
 let
+  inherit (lib) concatStringsSep;
   src_regexes = [
     "^x$"
     "^x/.*"
@@ -20,155 +37,76 @@ let
     "^third_party/cosmos-sdk/.*"
     "^gomod2nix.toml$"
   ];
-  lib = pkgs.lib;
-  build-chain-maind = { ledger_zemu ? false, network ? "mainnet" }: pkgs.buildGoApplication rec {
-    pname = "chain-maind";
-    version = "1.2.0";
-    src = lib.cleanSourceWith {
-      name = "src";
-      src = lib.sourceByRegex ./. src_regexes;
-    };
-    modules = ./gomod2nix.toml;
-    pwd = src; # needed to support replace
-    subPackages = [ "cmd/chain-maind" ];
-    CGO_ENABLED = "1";
-    outputs = [
-      "out"
-      "instrumented"
+  cgoLdFlags =
+    lib.optional (rocksdb != null) (
+      if static then
+        "-lrocksdb -pthread -lstdc++ -ldl -lzstd -lsnappy -llz4 -lbz2 -lz"
+      else if stdenv.hostPlatform.isWindows then
+        "-lrocksdb -lstdc++ -lzstd -lsnappy -llz4 -lbz2 -lz -lshlwapi -lrpcrt4"
+      else
+        "-lrocksdb -pthread -lstdc++ -ldl"
+    )
+    ++ lib.optionals (stdenv.isDarwin && sectrustShim != null) [
+      "${sectrustShim}/lib/libsectrustshim.a"
     ];
-    buildTags = "cgo,ledger,!test_ledger_mock,!ledger_mock," +
-      (if ledger_zemu then "ledger_zemu" else "!ledger_zemu") +
-      (lib.optionalString (network == "testnet") ",testnet");
-    buildFlags = "-tags ${buildTags}";
-    buildFlagsArray = ''
-      -ldflags=
-      -X github.com/cosmos/cosmos-sdk/version.Name=crypto-org-chain
-      -X github.com/cosmos/cosmos-sdk/version.AppName=${pname}
-      -X github.com/cosmos/cosmos-sdk/version.Version=${version}
-      -X github.com/cosmos/cosmos-sdk/version.Commit=${commit}
-      -X github.com/cosmos/cosmos-sdk/version.BuildTags=${buildTags}
-    '';
-
-    instrumentedBinary = "chain-maind-inst";
-    # FIXME remove the "-w -s" ldflags, https://github.com/golang/go/issues/40974
-    postBuild = ''
-      echo "Build instrumented binary"
-      go test ./cmd/chain-maind $buildFlags",testbincover" "''${buildFlagsArray[@]} -w -s" -coverpkg=./...,github.com/cosmos/cosmos-sdk/x/... -c -o ${instrumentedBinary}
-    '';
-    postInstall = ''
-      mkdir -p $instrumented/bin
-      mv ./${instrumentedBinary} $instrumented/bin/
-    '';
-    preFixup = ''
-      find $instrumented/bin/ -type f 2>/dev/null | xargs -r remove-references-to -t ${pkgs.go} || true
-    '';
-  };
 in
-rec {
-  inherit (pkgs) relayer cosmovisor;
-
-  chain-maind = build-chain-maind { };
-  pystarport = import ./pystarport { inherit pkgs; chaind = "${chain-maind}/bin/chain-maind"; };
-
-  chain-maind-testnet = build-chain-maind { network = "testnet"; };
-
-  # for testing and dev
-  chain-maind-zemu = build-chain-maind { ledger_zemu = true; };
-  # one can set binary with environment variable CHAIN_MAIND, or it'll find chain-maind in PATH
-  pystarport-unbind = import ./pystarport { inherit pkgs; };
-
-  # python env for python linter tools and pytest
-  test-pyenv = pkgs.poetry2nix.mkPoetryEnv { projectDir = ./integration_tests; };
-
-  # lint tools
-  lint-env = pkgs.buildEnv {
-    name = "lint-env";
-    pathsToLink = [ "/bin" "/share" ];
-    paths = with pkgs; [
-      test-pyenv
-      nixpkgs-fmt
-      (pkgs.writeShellScriptBin "lint-ci" ''
-        EXIT_STATUS=0
-        go mod verify || EXIT_STATUS=$?
-        flake8 --show-source --count --statistics \
-          --format="::error file=%(path)s,line=%(row)d,col=%(col)d::%(path)s:%(row)d:%(col)d: %(code)s %(text)s" \
-          || EXIT_STATUS=$?
-        find . -name "*.nix" -type f | xargs nixpkgs-fmt --check || EXIT_STATUS=$?
-        exit $EXIT_STATUS
-      '')
-    ];
+buildGoApplication rec {
+  pname = "chain-maind";
+  version = "v7.2.0";
+  go = buildPackages.go_1_25;
+  src = lib.cleanSourceWith {
+    name = "src";
+    src = lib.sourceByRegex ./. src_regexes;
   };
-  common-env = [
-    cosmovisor
-    relayer
-  ];
-
-  # sources for integration tests
-  # it needs the chain source code to build patched binaries on the fly
-  tests_src = lib.sourceByRegex ./. ([
-    "^integration_tests$"
-    "^integration_tests/.*\\.py$"
-    "^integration_tests/configs$"
-    "^integration_tests/configs/.*"
-    "^integration_tests/upgrade-test.nix$"
-    "^integration_tests/upgrade-test.patch$"
-    "^nix$"
-    "^nix/.*"
-    "^default.nix$"
-  ] ++ src_regexes);
-
-  # an env which can run integration tests
-  ci-env = pkgs.buildEnv {
-    name = "ci-env";
-    pathsToLink = [ "/bin" "/share" ];
-    paths = with pkgs; [
-      lint-env
-      chain-maind-zemu
-      chain-maind-zemu.instrumented
-    ] ++ common-env;
-  };
-
-  # main entrypoint script to run integration tests
-  run-integration-tests = pkgs.writeShellScriptBin "run-integration-tests" ''
-    set -e
-    export PATH=${ci-env}/bin:$PATH
-    export TESTS=${tests_src}/integration_tests
-    pytest -v -n 3 -m 'not ledger and not upgrade' --dist loadscope $TESTS
-    pytest -v -m upgrade $TESTS
-    pytest -v -m ledger $TESTS
+  modRoot = ".";
+  modules = ./gomod2nix.toml;
+  subPackages = [ "cmd/chain-maind" ];
+  buildFlags = lib.optionalString coverage "-cover";
+  buildInputs =
+    lib.lists.optional (rocksdb != null) rocksdb
+    ++ lib.lists.optionals (stdenv.isDarwin && sectrustShim != null) [ sectrustShim ];
+  CGO_ENABLED = "1";
+  CGO_LDFLAGS = lib.concatStringsSep " " cgoLdFlags;
+  tags = [
+    "cgo"
+    "ledger"
+    "!test_ledger_mock"
+    "!ledger_mock"
+    (if ledger_zemu then "ledger_zemu" else "!ledger_zemu")
+    network
+  ]
+  ++ lib.optionals (rocksdb != null) [
+    "rocksdb"
+    "grocksdb_no_link"
+  ]
+  ++ lib.optionals nativeByteOrder [ "nativebyteorder" ];
+  ldflags = ''
+    -X github.com/cosmos/cosmos-sdk/version.Name=crypto-org-chain
+    -X github.com/cosmos/cosmos-sdk/version.AppName=${pname}
+    -X github.com/cosmos/cosmos-sdk/version.Version=${version}
+    -X github.com/cosmos/cosmos-sdk/version.Commit=${rev}
+    -X github.com/cosmos/cosmos-sdk/version.BuildTags=${concatStringsSep "," tags}
   '';
-
-  ci-shell = pkgs.mkShell {
-    buildInputs = [
-      ci-env
-      run-integration-tests
-    ];
-    shellHook = ''
-      export TESTS=${tests_src}/integration_tests
-    '';
+  postFixup = lib.optionalString (stdenv.isDarwin && rocksdb != null) ''
+    ${stdenv.cc.bintools.targetPrefix}install_name_tool -change "@rpath/librocksdb.8.dylib" "${rocksdb}/lib/librocksdb.dylib" $out/bin/chain-maind
+  '';
+  passthru = {
+    # update script use the same golang version as the project
+    updateScript =
+      let
+        helper = gomod2nix.override { inherit go; };
+      in
+      writeShellScript "${pname}-updater" ''
+        exec ${helper}/bin/gomod2nix
+      '';
   };
 
-  # test in dev-shell will use the chain-maind in PATH
-  dev-shell = pkgs.mkShell {
-    buildInputs = with pkgs; [
-      lint-env
-      go
-      python3Packages.poetry
-      pystarport-unbind
-    ] ++ common-env;
-
-    shellHook = ''
-      # prefer local pystarport directory for development
-      export PYTHONPATH=./pystarport:$PYTHONPATH
-      # convinience for working with remote shell
-      export SRC=${chain-maind.src}
-    '';
-  };
-
-  chain-utils-testnet = import ./scripts/chain-utils.nix {
-    inherit pkgs; network = "testnet";
-  };
-  chain-utils-mainnet = import ./scripts/chain-utils.nix {
-    inherit pkgs; network = "mainnet";
+  doCheck = false;
+  meta = with lib; {
+    description = "Official implementation of the Cronos.org blockchain protocol";
+    homepage = "https://cronos.org/";
+    license = licenses.asl20;
+    mainProgram = "chain-maind" + stdenv.hostPlatform.extensions.executable;
+    platforms = platforms.all;
   };
 }

@@ -5,6 +5,8 @@ import (
 	"log"
 	"sync"
 
+	sdkmath "cosmossdk.io/math"
+
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
 
@@ -15,17 +17,15 @@ func SetConfig() {
 	config.SetBech32PrefixForConsensusNode(ConsNodeAddressPrefix, ConsNodePubKeyPrefix)
 
 	config.SetCoinType(CoinType)
-	config.SetFullFundraiserPath(FundraiserPath)
 
-	croUnit := sdk.OneDec()
+	croUnit := sdkmath.LegacyOneDec()
 	err := sdk.RegisterDenom(HumanCoinUnit, croUnit)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	carsonUnit := sdk.NewDecWithPrec(1, int64(CroExponent)) // 10^-8 (carson)
+	carsonUnit := sdkmath.LegacyNewDecWithPrec(1, int64(CroExponent)) // 10^-8 (carson)
 	err = sdk.RegisterDenom(BaseCoinUnit, carsonUnit)
-
 	if err != nil {
 		log.Fatal(err)
 	}

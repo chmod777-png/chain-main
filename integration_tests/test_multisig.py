@@ -1,9 +1,12 @@
 import json
 
+import pytest
 from pystarport import ports
 from pystarport.proto_python.api_util import ApiUtil
 
 from .utils import wait_for_new_blocks
+
+pytestmark = pytest.mark.normal
 
 
 def test_multi_signature(cluster, tmp_path):
@@ -82,12 +85,12 @@ def test_multi_signature_batch(cluster, tmp_path):
     account_num = multi_account_info["account_num"]
     sequence = multi_account_info["sequence"]
     signature2 = cluster.sign_batch_multisig_tx(
-        m_txt, multi_addr, "msigner1", account_num, sequence
+        m_txt, multi_addr, signer1_addr, account_num, sequence
     )
     with open(p1_txt, "w") as f:
         f.write(signature2)
     signature3 = cluster.sign_batch_multisig_tx(
-        m_txt, multi_addr, "msigner2", account_num, sequence
+        m_txt, multi_addr, signer2_addr, account_num, sequence
     )
     with open(p2_txt, "w") as f:
         f.write(signature3)

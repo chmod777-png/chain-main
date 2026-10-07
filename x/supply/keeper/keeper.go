@@ -1,11 +1,14 @@
 package keeper
 
 import (
+	"github.com/crypto-org-chain/chain-main/v8/x/supply/types"
+
+	newsdkerrors "cosmossdk.io/errors"
+	storetypes "cosmossdk.io/store/types"
+
 	"github.com/cosmos/cosmos-sdk/codec"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
-	"github.com/crypto-org-chain/chain-main/v2/x/supply/types"
-
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	vestexported "github.com/cosmos/cosmos-sdk/x/auth/vesting/exported"
 	distrtypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
@@ -14,30 +17,28 @@ import (
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 )
 
-var (
-	// ModuleAccounts defines the module accounts which will be queried to get liquid supply
-	ModuleAccounts = []string{
-		authtypes.FeeCollectorName,
-		distrtypes.ModuleName,
-		stakingtypes.BondedPoolName,
-		stakingtypes.NotBondedPoolName,
-		minttypes.ModuleName,
-		govtypes.ModuleName,
-	}
-)
+// ModuleAccounts defines the module accounts which will be queried to get liquid supply
+var ModuleAccounts = []string{
+	authtypes.FeeCollectorName,
+	distrtypes.ModuleName,
+	stakingtypes.BondedPoolName,
+	stakingtypes.NotBondedPoolName,
+	minttypes.ModuleName,
+	govtypes.ModuleName,
+}
 
 // Keeper for supply module
 type Keeper struct {
-	cdc           codec.BinaryMarshaler
-	storeKey      sdk.StoreKey
+	cdc           codec.BinaryCodec
+	storeKey      storetypes.StoreKey
 	bankKeeper    types.BankKeeper
 	accountKeeper types.AccountKeeper
 }
 
 // NewKeeper returns a new keeper
 func NewKeeper(
-	cdc codec.BinaryMarshaler,
-	storeKey sdk.StoreKey,
+	cdc codec.BinaryCodec,
+	storeKey storetypes.StoreKey,
 	bankKeeper types.BankKeeper,
 	accountKeeper types.AccountKeeper,
 ) Keeper {
@@ -53,7 +54,7 @@ func NewKeeper(
 func (k Keeper) FetchVestingAccounts(ctx sdk.Context) types.VestingAccounts {
 	var addresses []string
 
-	k.accountKeeper.IterateAccounts(ctx, func(account authtypes.AccountI) bool {
+	k.accountKeeper.IterateAccounts(ctx, func(account sdk.AccountI) bool {
 		vacc, ok := account.(vestexported.VestingAccount)
 		if ok {
 			addresses = append(addresses, vacc.GetAddress().String())
@@ -69,7 +70,7 @@ func (k Keeper) FetchVestingAccounts(ctx sdk.Context) types.VestingAccounts {
 // SetVestingAccounts persists given vesting accounts
 func (k Keeper) SetVestingAccounts(ctx sdk.Context, vestingAccounts types.VestingAccounts) {
 	store := ctx.KVStore(k.storeKey)
-	b := k.cdc.MustMarshalBinaryBare(&vestingAccounts)
+	b := k.cdc.MustMarshal(&vestingAccounts)
 	store.Set(types.VestingAccountsKey, b)
 }
 
@@ -85,14 +86,18 @@ func (k Keeper) GetVestingAccounts(ctx sdk.Context) types.VestingAccounts {
 	}
 
 	var vestingAccounts types.VestingAccounts
-	k.cdc.MustUnmarshalBinaryBare(b, &vestingAccounts)
+	k.cdc.MustUnmarshal(b, &vestingAccounts)
 	return vestingAccounts
 }
 
 // GetTotalSupply returns the current total supply in the system
 func (k Keeper) GetTotalSupply(ctx sdk.Context) sdk.Coins {
-	supply := k.bankKeeper.GetSupply(ctx)
-	return supply.GetTotal()
+	var totalSupply sdk.Coins
+	k.bankKeeper.IterateTotalSupply(ctx, func(coin sdk.Coin) bool {
+		totalSupply = totalSupply.Add(coin)
+		return false
+	})
+	return totalSupply
 }
 
 // GetUnvestedSupply returns total unvested supply
@@ -118,7 +123,7 @@ func (k Keeper) GetModuleAccountBalance(ctx sdk.Context, moduleName string) sdk.
 	addr := k.accountKeeper.GetModuleAddress(moduleName)
 
 	if addr == nil {
-		panic(sdkerrors.Wrapf(sdkerrors.ErrUnknownAddress, "module account %s does not exist", moduleName))
+		panic(newsdkerrors.Wrapf(sdkerrors.ErrUnknownAddress, "module account %s does not exist", moduleName))
 	}
 
 	return k.bankKeeper.GetAllBalances(ctx, addr)
@@ -141,5 +146,5 @@ func (k Keeper) GetLiquidSupply(ctx sdk.Context) sdk.Coins {
 	unvestedSupply := k.GetUnvestedSupply(ctx)
 	moduleAccountBalance := k.GetTotalModuleAccountBalance(ctx, ModuleAccounts...)
 
-	return totalSupply.Sub(unvestedSupply).Sub(moduleAccountBalance)
+	return totalSupply.Sub(unvestedSupply...).Sub(moduleAccountBalance...)
 }

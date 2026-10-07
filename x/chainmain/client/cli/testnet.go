@@ -4,6 +4,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,18 +13,21 @@ import (
 	"path/filepath"
 	"time"
 
-	crypto "github.com/cosmos/cosmos-sdk/crypto/types"
+	tmconfig "github.com/cometbft/cometbft/config"
+	tmos "github.com/cometbft/cometbft/libs/os"
+	tmtypes "github.com/cometbft/cometbft/types"
+	tmtime "github.com/cometbft/cometbft/types/time"
 	"github.com/spf13/cobra"
-	tmconfig "github.com/tendermint/tendermint/config"
-	tmos "github.com/tendermint/tendermint/libs/os"
-	tmtypes "github.com/tendermint/tendermint/types"
-	tmtime "github.com/tendermint/tendermint/types/time"
+
+	sdkmath "cosmossdk.io/math"
 
 	"github.com/cosmos/cosmos-sdk/client"
 	"github.com/cosmos/cosmos-sdk/client/flags"
 	"github.com/cosmos/cosmos-sdk/client/tx"
 	"github.com/cosmos/cosmos-sdk/crypto/hd"
 	"github.com/cosmos/cosmos-sdk/crypto/keyring"
+	crypto "github.com/cosmos/cosmos-sdk/crypto/types"
+	"github.com/cosmos/cosmos-sdk/runtime"
 	"github.com/cosmos/cosmos-sdk/server"
 	srvconfig "github.com/cosmos/cosmos-sdk/server/config"
 	sdk "github.com/cosmos/cosmos-sdk/types"
@@ -34,6 +38,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/x/genutil"
 	genutiltypes "github.com/cosmos/cosmos-sdk/x/genutil/types"
 	govtypes "github.com/cosmos/cosmos-sdk/x/gov/types"
+	govv1 "github.com/cosmos/cosmos-sdk/x/gov/types/v1"
 	minttypes "github.com/cosmos/cosmos-sdk/x/mint/types"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 )
@@ -49,7 +54,7 @@ var (
 	flagUnbondingTime     = "unbonding-time"
 )
 
-// get cmd to initialize all files for tendermint testnet and application
+// AddTestnetCmd get cmd to initialize all files for cometbft testnet and application
 func AddTestnetCmd(
 	mbm module.BasicManager,
 	genBalIterator banktypes.GenesisBalancesIterator,
@@ -101,9 +106,9 @@ Example:
 			if numValidatorsErr != nil {
 				return fmt.Errorf("failed to parse %v: %w", flagNumValidators, numValidatorsErr)
 			}
-			algo, algoErr := cmd.Flags().GetString(flags.FlagKeyAlgorithm)
+			algo, algoErr := cmd.Flags().GetString(flags.FlagKeyType)
 			if algoErr != nil {
-				return fmt.Errorf("failed to parse %v: %w", flags.FlagKeyAlgorithm, algoErr)
+				return fmt.Errorf("failed to parse %v: %w", flags.FlagKeyType, algoErr)
 			}
 			amount, amountErr := cmd.Flags().GetString(flagAmount)
 			if amountErr != nil {
@@ -128,12 +133,12 @@ Example:
 	cmd.Flags().String(flagNodeDaemonHome, ".chain-maind", "Home directory of the node's daemon configuration")
 	cmd.Flags().String(flagStartingIPAddress,
 		"192.168.0.1",
-		"Starting IP address (192.168.0.1 results in persistent peers list ID0@192.168.0.1:46656, ID1@192.168.0.2:46656, ...)") //nolint
+		"Starting IP address (192.168.0.1 results in persistent peers list ID0@192.168.0.1:46656, ID1@192.168.0.2:46656, ...)")
 	cmd.Flags().String(flags.FlagChainID, "cro-test", "genesis file chain-id")
 	cmd.Flags().String(server.FlagMinGasPrices, "",
-		"Minimum gas prices to accept for transactions; All fees in a tx must meet this minimum (e.g. 0.00000001cro,1basecro)") //nolint
+		"Minimum gas prices to accept for transactions; All fees in a tx must meet this minimum (e.g. 0.00000001cro,1basecro)")
 	cmd.Flags().String(flags.FlagKeyringBackend, keyring.BackendTest, "Select keyring's backend (os|file|test)")
-	cmd.Flags().String(flags.FlagKeyAlgorithm, string(hd.Secp256k1Type), "Key signing algorithm to generate keys for")
+	cmd.Flags().String(flags.FlagKeyType, string(hd.Secp256k1Type), "Key signing algorithm to generate keys for")
 	cmd.Flags().String(flagAmount, "20000000000000000basecro", "amount of coins for accounts")
 	cmd.Flags().String(flagStakingAmount, "", "amount of coins for staking (default half of account amount)")
 	cmd.Flags().String(flagVestingAmt, "", "amount of coins for vesting accounts")
@@ -144,7 +149,7 @@ Example:
 	return cmd
 }
 
-const nodeDirPerm = 0755
+const nodeDirPerm = 0o755
 
 var (
 	genAccounts []authtypes.GenesisAccount
@@ -152,7 +157,7 @@ var (
 	genFiles    []string
 )
 
-// Initialize the testnet
+// InitTestnet Initialize the testnet
 func InitTestnet(
 	clientCtx client.Context,
 	cmd *cobra.Command,
@@ -225,7 +230,7 @@ func InitTestnet(
 		gentxsDir := filepath.Join(outputDir, "gentxs")
 
 		nodeConfig.SetRoot(nodeDir)
-		nodeConfig.RPC.ListenAddress = "tcp://0.0.0.0:26657"
+		nodeConfig.RPC.ListenAddress = "tcp://127.0.0.1:26657"
 
 		if err = os.MkdirAll(filepath.Join(nodeDir, "config"), nodeDirPerm); err != nil {
 			_ = os.RemoveAll(outputDir)
@@ -249,7 +254,7 @@ func InitTestnet(
 		memo := fmt.Sprintf("%s@%s:26656", nodeIDs[i], ip)
 		genFiles = append(genFiles, nodeConfig.GenesisFile())
 
-		kb, keyErr := keyring.New(sdk.KeyringServiceName(), keyringBackend, nodeDir, inBuf)
+		kb, keyErr := keyring.New(sdk.KeyringServiceName(), keyringBackend, nodeDir, inBuf, clientCtx.Codec)
 		if keyErr != nil {
 			return keyErr
 		}
@@ -261,12 +266,17 @@ func InitTestnet(
 		}
 
 		keyInfo, secret, saveErr := kb.NewMnemonic(nodeDirName,
-			keyring.English, sdk.GetConfig().GetFullFundraiserPath(), algo)
+			keyring.English, sdk.GetConfig().GetFullBIP44Path(), keyring.DefaultBIP39Passphrase, algo)
 		if saveErr != nil {
 			_ = os.RemoveAll(outputDir)
 			return saveErr
 		}
-		addr := keyInfo.GetAddress()
+		var addr sdk.AccAddress
+		addr, err = keyInfo.GetAddress()
+		if err != nil {
+			_ = os.RemoveAll(outputDir)
+			return err
+		}
 
 		info := map[string]string{"secret": secret, "addr": addr.String()}
 
@@ -287,8 +297,10 @@ func InitTestnet(
 		baseAccount := authtypes.NewBaseAccount(addr, nil, 0, 0)
 
 		if !vestingCoins.IsZero() {
-			baseVestingAccount := authvesting.NewBaseVestingAccount(baseAccount, vestingCoins.Sort(), int64(vestingEnd))
-
+			baseVestingAccount, err := authvesting.NewBaseVestingAccount(baseAccount, vestingCoins.Sort(), int64(vestingEnd))
+			if err != nil {
+				return fmt.Errorf("failed to create base vesting account: %w", err)
+			}
 			if (genbalance.Coins.IsZero() && !baseVestingAccount.OriginalVesting.IsZero()) ||
 				baseVestingAccount.OriginalVesting.IsAnyGT(genbalance.Coins) {
 				return errors.New("vesting amount cannot be greater than total amount")
@@ -316,12 +328,12 @@ func InitTestnet(
 		genAccounts = append(genAccounts, genAccount)
 
 		createValMsg, err2 := stakingtypes.NewMsgCreateValidator(
-			sdk.ValAddress(addr),
+			addr.String(),
 			valPubKeys[i],
 			stakingCoin,
 			stakingtypes.NewDescription(nodeDirName, "", "", "", ""),
-			stakingtypes.NewCommissionRates(sdk.NewDecWithPrec(1, 1), sdk.NewDecWithPrec(2, 1), sdk.NewDecWithPrec(1, 2)),
-			sdk.OneInt(),
+			stakingtypes.NewCommissionRates(sdkmath.LegacyNewDecWithPrec(1, 1), sdkmath.LegacyNewDecWithPrec(2, 1), sdkmath.LegacyNewDecWithPrec(1, 2)),
+			sdkmath.OneInt(),
 		)
 		if err2 != nil {
 			return err2
@@ -341,7 +353,7 @@ func InitTestnet(
 			WithKeybase(kb).
 			WithTxConfig(clientCtx.TxConfig)
 
-		if err = tx.Sign(txFactory, nodeDirName, txBuilder, true); err != nil {
+		if err = tx.Sign(context.Background(), txFactory, nodeDirName, txBuilder, true); err != nil {
 			return err
 		}
 
@@ -366,6 +378,7 @@ func InitTestnet(
 	err = collectGenFiles(
 		clientCtx, nodeConfig, chainID, nodeIDs, valPubKeys, numValidators,
 		outputDir, nodeDirPrefix, nodeDaemonHome, genBalIterator,
+		clientCtx.InterfaceRegistry.SigningContext().ValidatorAddressCodec(),
 	)
 	if err != nil {
 		return err
@@ -381,12 +394,12 @@ func initGenFiles(
 	genFiles []string, numValidators int,
 	unbondingTime time.Duration,
 ) error {
-	appGenState := mbm.DefaultGenesis(clientCtx.JSONMarshaler)
+	appGenState := mbm.DefaultGenesis(clientCtx.Codec)
 
 	// set staking param in the genesis state
 
 	var stakingGenState stakingtypes.GenesisState
-	clientCtx.JSONMarshaler.MustUnmarshalJSON(appGenState[stakingtypes.ModuleName], &stakingGenState)
+	clientCtx.Codec.MustUnmarshalJSON(appGenState[stakingtypes.ModuleName], &stakingGenState)
 	baseDenom, err := sdk.GetBaseDenom()
 	if err != nil {
 		return err
@@ -394,24 +407,23 @@ func initGenFiles(
 	stakingGenState.Params.BondDenom = baseDenom
 	stakingGenState.Params.UnbondingTime = unbondingTime
 
-	appGenState[stakingtypes.ModuleName] = clientCtx.JSONMarshaler.MustMarshalJSON(&stakingGenState)
+	appGenState[stakingtypes.ModuleName] = clientCtx.Codec.MustMarshalJSON(&stakingGenState)
 
 	// set gov min_deposit in the genesis state
-	var govGenState govtypes.GenesisState
-	clientCtx.JSONMarshaler.MustUnmarshalJSON(appGenState[govtypes.ModuleName], &govGenState)
-	govGenState.DepositParams.MinDeposit[0].Denom = baseDenom
-	govGenState.DepositParams.MinDeposit[0].Amount = govtypes.DefaultMinDepositTokens
-	appGenState[govtypes.ModuleName] = clientCtx.JSONMarshaler.MustMarshalJSON(&govGenState)
+	var govGenState govv1.GenesisState
+	clientCtx.Codec.MustUnmarshalJSON(appGenState[govtypes.ModuleName], &govGenState)
+	govGenState.Params.MinDeposit[0].Denom = baseDenom
+	appGenState[govtypes.ModuleName] = clientCtx.Codec.MustMarshalJSON(&govGenState)
 
 	// set mint in the genesis state
 	var mintGenState minttypes.GenesisState
-	clientCtx.JSONMarshaler.MustUnmarshalJSON(appGenState[minttypes.ModuleName], &mintGenState)
+	clientCtx.Codec.MustUnmarshalJSON(appGenState[minttypes.ModuleName], &mintGenState)
 	mintGenState.Params.MintDenom = baseDenom
-	appGenState[minttypes.ModuleName] = clientCtx.JSONMarshaler.MustMarshalJSON(&mintGenState)
+	appGenState[minttypes.ModuleName] = clientCtx.Codec.MustMarshalJSON(&mintGenState)
 
 	// set the accounts in the genesis state
 	var authGenState authtypes.GenesisState
-	clientCtx.JSONMarshaler.MustUnmarshalJSON(appGenState[authtypes.ModuleName], &authGenState)
+	clientCtx.Codec.MustUnmarshalJSON(appGenState[authtypes.ModuleName], &authGenState)
 
 	accounts, err := authtypes.PackAccounts(genAccounts)
 	if err != nil {
@@ -419,14 +431,14 @@ func initGenFiles(
 	}
 
 	authGenState.Accounts = accounts
-	appGenState[authtypes.ModuleName] = clientCtx.JSONMarshaler.MustMarshalJSON(&authGenState)
+	appGenState[authtypes.ModuleName] = clientCtx.Codec.MustMarshalJSON(&authGenState)
 
 	// set the balances in the genesis state
 	var bankGenState banktypes.GenesisState
-	clientCtx.JSONMarshaler.MustUnmarshalJSON(appGenState[banktypes.ModuleName], &bankGenState)
+	clientCtx.Codec.MustUnmarshalJSON(appGenState[banktypes.ModuleName], &bankGenState)
 
 	bankGenState.Balances = genBalances
-	appGenState[banktypes.ModuleName] = clientCtx.JSONMarshaler.MustMarshalJSON(&bankGenState)
+	appGenState[banktypes.ModuleName] = clientCtx.Codec.MustMarshalJSON(&bankGenState)
 
 	appGenStateJSON, err := json.MarshalIndent(appGenState, "", "  ")
 	if err != nil {
@@ -452,8 +464,8 @@ func collectGenFiles(
 	clientCtx client.Context, nodeConfig *tmconfig.Config, chainID string,
 	nodeIDs []string, valPubKeys []crypto.PubKey, numValidators int,
 	outputDir, nodeDirPrefix, nodeDaemonHome string, genBalIterator banktypes.GenesisBalancesIterator,
+	valAddrCodec runtime.ValidatorAddressCodec,
 ) error {
-
 	var appState json.RawMessage
 	genTime := tmtime.Now()
 
@@ -468,14 +480,16 @@ func collectGenFiles(
 		nodeID, valPubKey := nodeIDs[i], valPubKeys[i]
 		initCfg := genutiltypes.NewInitConfig(chainID, gentxsDir, nodeID, valPubKey)
 
-		genDoc, err := tmtypes.GenesisDocFromFile(nodeConfig.GenesisFile())
+		genDoc, err := genutiltypes.AppGenesisFromFile(nodeConfig.GenesisFile())
 		if err != nil {
 			return err
 		}
 
 		nodeAppState, err := genutil.GenAppStateFromConfig(
-			clientCtx.JSONMarshaler, clientCtx.TxConfig,
-			nodeConfig, initCfg, *genDoc, genBalIterator)
+			clientCtx.Codec, clientCtx.TxConfig,
+			nodeConfig, initCfg, genDoc, genBalIterator, genutiltypes.DefaultMessageValidator,
+			valAddrCodec,
+		)
 		if err != nil {
 			return err
 		}
@@ -520,16 +534,15 @@ func calculateIP(ip string, i int) (string, error) {
 	return ipv4.String(), nil
 }
 
-func writeFile(name string, dir string, contents []byte) error {
-	writePath := filepath.Join(dir)
-	file := filepath.Join(writePath, name)
+func writeFile(name, dir string, contents []byte) error {
+	file := filepath.Join(dir, name)
 
-	err := tmos.EnsureDir(writePath, 0755)
+	err := tmos.EnsureDir(dir, 0o755)
 	if err != nil {
 		return err
 	}
 
-	err = tmos.WriteFile(file, contents, 0600)
+	err = tmos.WriteFile(file, contents, 0o600)
 	if err != nil {
 		return err
 	}
@@ -544,7 +557,7 @@ func parseStakingCoin(coins sdk.Coins, stakingAmount string) (sdk.Coin, error) {
 	}
 	stakingCoin := sdk.Coin{
 		Denom:  baseDenom,
-		Amount: sdk.ZeroInt(),
+		Amount: sdkmath.ZeroInt(),
 	}
 	if stakingAmount == "" {
 		stakingCoin.Amount = halfCoins(coins)
@@ -559,10 +572,10 @@ func parseStakingCoin(coins sdk.Coins, stakingAmount string) (sdk.Coin, error) {
 }
 
 // return half amount of coins
-func halfCoins(coins sdk.Coins) sdk.Int {
-	amount := sdk.ZeroInt()
+func halfCoins(coins sdk.Coins) sdkmath.Int {
+	amount := sdkmath.ZeroInt()
 	for _, coin := range coins {
-		amount = amount.Add(coin.Amount.Quo(sdk.NewInt(2)))
+		amount = amount.Add(coin.Amount.Quo(sdkmath.NewInt(2)))
 	}
 	return amount
 }

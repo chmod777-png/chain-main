@@ -1,0 +1,27 @@
+//go:build rocksdb
+
+package app
+
+import (
+	"sort"
+
+	"github.com/crypto-org-chain/chain-main/v8/app"
+	"github.com/crypto-org-chain/chain-main/v8/cmd/chain-maind/opendb"
+	versiondbclient "github.com/crypto-org-chain/cronos-store/versiondb/client"
+	"github.com/spf13/cobra"
+)
+
+func ChangeSetCmd() *cobra.Command {
+	keys, _, _ := app.StoreKeys()
+	storeNames := make([]string, 0, len(keys))
+	for name := range keys {
+		storeNames = append(storeNames, name)
+	}
+	sort.Strings(storeNames)
+
+	return versiondbclient.ChangeSetGroupCmd(versiondbclient.Options{
+		DefaultStores:     storeNames,
+		OpenReadOnlyDB:    opendb.OpenReadOnlyDB,
+		AppRocksDBOptions: opendb.NewRocksdbOptions,
+	})
+}

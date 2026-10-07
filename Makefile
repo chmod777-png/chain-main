@@ -1,53 +1,125 @@
 PACKAGES=$(shell go list ./... | grep -v '/simulation')
 PACKAGE_NAME:=github.com/crypto-org-chain/chain-main
-GOLANG_CROSS_VERSION  = v1.16.1
 
 
 VERSION := $(shell echo $(shell git describe --tags 2>/dev/null ) | sed 's/^v//')
+TMVERSION := $(shell go list -m github.com/cometbft/cometbft | sed 's:.* ::')
 COMMIT := $(shell git log -1 --format='%H')
 NETWORK ?= mainnet
 COVERAGE ?= coverage.txt
 BUILDDIR ?= $(CURDIR)/build
+GO_DEFAULT_TOOLDIR := $(shell go env GOTOOLDIR 2>/dev/null)
+COVDATA_GOTOOLDIR ?= $(GO_DEFAULT_TOOLDIR)
 LEDGER_ENABLED ?= true
 
-ldflags = -X github.com/cosmos/cosmos-sdk/version.Name=crypto-org-chain-chain \
-	-X github.com/cosmos/cosmos-sdk/version.ServerName=chain-maind \
-	-X github.com/cosmos/cosmos-sdk/version.Version=$(VERSION) \
-	-X github.com/cosmos/cosmos-sdk/version.Commit=$(COMMIT)
+export GO111MODULE = on
 
-BUILD_FLAGS := -ldflags '$(ldflags)'
-TESTNET_FLAGS ?=
-
-ledger ?= HID
+build_tags = netgo
 ifeq ($(LEDGER_ENABLED),true)
-	BUILD_TAGS := -tags cgo,ledger,!test_ledger_mock,!ledger_mock
-	ifeq ($(ledger), ZEMU)
-		BUILD_TAGS := $(BUILD_TAGS),ledger_zemu
-	else
-		BUILD_TAGS := $(BUILD_TAGS),!ledger_zemu
-	endif
+  ifeq ($(OS),Windows_NT)
+    GCCEXE = $(shell where gcc.exe 2> NUL)
+    ifeq ($(GCCEXE),)
+      $(error gcc.exe not installed for ledger support, please install or set LEDGER_ENABLED=false)
+    else
+      build_tags += ledger
+    endif
+  else
+    UNAME_S = $(shell uname -s)
+    ifeq ($(UNAME_S),OpenBSD)
+      $(warning OpenBSD detected, disabling ledger support (https://github.com/cosmos/cosmos-sdk/issues/1988))
+    else
+      GCC = $(shell command -v gcc 2> /dev/null)
+      ifeq ($(GCC),)
+        $(error gcc not installed for ledger support, please install or set LEDGER_ENABLED=false)
+      else
+        build_tags += ledger
+      endif
+    endif
+  endif
+endif
+
+ifeq (secp,$(findstring secp,$(COSMOS_BUILD_OPTIONS)))
+  build_tags += libsecp256k1_sdk
+endif
+
+# DB backend selection
+ifeq (cleveldb,$(findstring cleveldb,$(COSMOS_BUILD_OPTIONS)))
+  build_tags += gcc
+endif
+ifeq (badgerdb,$(findstring badgerdb,$(COSMOS_BUILD_OPTIONS)))
+  BUILD_TAGS += badgerdb
+endif
+# handle rocksdb
+ifeq (rocksdb,$(findstring rocksdb,$(COSMOS_BUILD_OPTIONS)))
+  CGO_ENABLED=1
+  BUILD_TAGS += rocksdb grocksdb_clean_link
+endif
+# handle boltdb
+ifeq (boltdb,$(findstring boltdb,$(COSMOS_BUILD_OPTIONS)))
+  BUILD_TAGS += boltdb
 endif
 
 ifeq ($(NETWORK),testnet)
-	BUILD_TAGS := $(BUILD_TAGS),testnet
-	TEST_TAGS := "--tags=testnet"
+	BUILD_TAGS += testnet
+	test_tags += testnet
 endif
 
-SIMAPP = github.com/crypto-org-chain/chain-main/v2/app
+build_tags += $(BUILD_TAGS)
+build_tags := $(strip $(build_tags))
+
+whitespace :=
+whitespace += $(whitespace)
+comma := ,
+build_tags_comma_sep := $(subst $(whitespace),$(comma),$(build_tags))
+
+# process linker flags
+
+ldflags = -X github.com/cosmos/cosmos-sdk/version.Name=crypto-org-chain-chain \
+	-X github.com/cosmos/cosmos-sdk/version.AppName=chain-maind \
+	-X github.com/cosmos/cosmos-sdk/version.Version=$(VERSION) \
+	-X github.com/cosmos/cosmos-sdk/version.Commit=$(COMMIT) \
+	-X github.com/cometbft/cometbft/version.TMCoreSemVer=$(TMVERSION) \
+	-X "github.com/cosmos/cosmos-sdk/version.BuildTags=$(build_tags_comma_sep)"
+
+ifeq (,$(findstring nostrip,$(COSMOS_BUILD_OPTIONS)))
+  ldflags += -w -s
+endif
+ldflags += $(LDFLAGS)
+ldflags := $(strip $(ldflags))
+
+BUILD_FLAGS := -tags "$(build_tags)" -ldflags '$(ldflags)'
+# check for nostrip option
+ifeq (,$(findstring nostrip,$(COSMOS_BUILD_OPTIONS)))
+  BUILD_FLAGS += -trimpath
+endif
+
+# Check for debug option
+ifeq (debug,$(findstring debug,$(COSMOS_BUILD_OPTIONS)))
+  BUILD_FLAGS += -gcflags "all=-N -l"
+endif
+
+TEST_FLAGS := -tags "$(test_tags)"
+
+TESTNET_FLAGS ?=
+
+SIMAPP = github.com/crypto-org-chain/chain-main/v8/app
 BINDIR ?= ~/go/bin
 
 OS := $(shell uname)
 
-all: install
+all: download install
+
+download:
+	git submodule update --init --recursive
 
 install: check-network go.sum
-		go install -mod=readonly $(BUILD_FLAGS) $(BUILD_TAGS) ./cmd/chain-maind
+		go install -mod=readonly $(BUILD_FLAGS) ./cmd/chain-maind
 
 build: check-network go.sum
-		go build -mod=readonly $(BUILD_FLAGS) $(BUILD_TAGS) -o $(BUILDDIR)/chain-maind ./cmd/chain-maind
+		go build -mod=readonly $(BUILD_FLAGS) -o $(BUILDDIR)/chain-maind ./cmd/chain-maind
 
 buildwindows: check-network go.sum
-		go build -buildmode=exe -mod=readonly $(BUILD_FLAGS) $(BUILD_TAGS) -o $(BUILDDIR)/chain-maind ./cmd/chain-maind
+		go build -buildmode=exe -mod=readonly $(BUILD_FLAGS) -o $(BUILDDIR)/chain-maind ./cmd/chain-maind
 
 
 .PHONY: build
@@ -70,9 +142,57 @@ go.sum: go.mod
 		@echo "--> Ensure dependencies have not been modified"
 		GO111MODULE=on go mod verify
 
-test: check-network
-	@go test $(TEST_TAGS) -v -mod=readonly $(PACKAGES) -coverprofile=$(COVERAGE) -covermode=atomic
+test: check-network covdata
+	@go test $(TEST_FLAGS) -v -mod=readonly $(PACKAGES) -coverprofile=$(COVERAGE) -covermode=atomic
 .PHONY: test
+
+covdata:
+	@toolDir="$(COVDATA_GOTOOLDIR)"; \
+	defaultToolDir="$(GO_DEFAULT_TOOLDIR)"; \
+	if [ -z "$$toolDir" ]; then \
+		toolDir="$$defaultToolDir"; \
+	fi; \
+	if [ -z "$$toolDir" ]; then \
+		echo "unable to determine Go tool directory; set COVDATA_GOTOOLDIR"; \
+		exit 1; \
+	fi; \
+	if [ "$$toolDir" != "$$defaultToolDir" ]; then \
+		echo "--> installing covdata into $$toolDir (Go currently uses $$defaultToolDir)"; \
+	fi; \
+	if [ ! -d "$$toolDir" ]; then \
+		echo "--> Go tool directory $$toolDir is missing"; \
+		exit 1; \
+	fi; \
+	if [ ! -x "$$toolDir/covdata" ]; then \
+		if [ ! -w "$$toolDir" ]; then \
+			echo "--> $$toolDir is not writable; install Go into a writable location or grant access before running make covdata"; \
+			exit 1; \
+		fi; \
+		echo "--> building go tool covdata"; \
+		goRoot=$$(go env GOROOT); \
+		if [ -z "$$goRoot" ]; then \
+			echo "go env GOROOT returned empty value"; \
+			exit 1; \
+		fi; \
+		if [ ! -d "$$goRoot/src/cmd/covdata" ]; then \
+			echo "cannot find covdata sources under $$goRoot/src/cmd/covdata"; \
+			exit 1; \
+		fi; \
+		tmpFile=$$(mktemp "$$toolDir/covdata.XXXXXX"); \
+		if (cd "$$goRoot/src/cmd/covdata" && go build -trimpath -o "$$tmpFile"); then \
+			: ; \
+		else \
+			rm -f "$$tmpFile"; \
+			exit 1; \
+		fi; \
+		mv "$$tmpFile" "$$toolDir/covdata"; \
+		chmod +x "$$toolDir/covdata"; \
+	fi
+.PHONY: covdata
+
+lint-install:
+	@echo "--> Installing golangci-lint $(golangci_version)"
+	@nix profile install -f ./nix golangci-lint
 
 # look into .golangci.yml for enabling / disabling linters
 lint:
@@ -80,32 +200,45 @@ lint:
 	@golangci-lint run
 	@go mod verify
 	@flake8 --show-source --count --statistics
-	@find . -name "*.nix" -type f | xargs nixpkgs-fmt --check
+	@find . -name "*.nix" -type f -not -path "./vendor/*" | xargs nixfmt -c
+
+
+lint-fix:
+	@echo "--> Running linter"
+	@golangci-lint run --fix
+	@go mod verify
+	@black --line-length 88 integration_tests/
+	@flake8 --show-source --count --statistics
+	@find . -name "*.nix" -type f -not -path "./vendor/*" | xargs nixfmt -c
 
 # a trick to make all the lint commands execute, return error when at least one fails.
 # golangci-lint is run in standalone job in ci
 lint-ci:
 	@echo "--> Running linter for CI"
-	@nix run -f ./. lint-env -c lint-ci
+	@nix-shell --pure -E "with (import ./nix {}); mkShell { buildInputs = [lint-ci]; }" --run lint-ci
+
+vulncheck: $(BUILDDIR)/
+	GOBIN=$(BUILDDIR) go install golang.org/x/vuln/cmd/govulncheck@latest
+	$(BUILDDIR)/govulncheck ./...
 
 test-sim-nondeterminism: check-network
 	@echo "Running non-determinism test..."
-	@go test $(TEST_TAGS) -mod=readonly $(SIMAPP) -run TestAppStateDeterminism -Enabled=true \
+	@go test $(TEST_FLAGS) -mod=readonly $(SIMAPP) -run TestAppStateDeterminism -Enabled=true \
 		-NumBlocks=100 -BlockSize=200 -Commit=true -Period=0 -v -timeout 24h
 
 test-sim-custom-genesis-fast: check-network
 	@echo "Running custom genesis simulation..."
 	@echo "By default, ${HOME}/.chain-maind/config/genesis.json will be used."
-	@go test $(TEST_TAGS) -mod=readonly $(SIMAPP) -run TestFullAppSimulation -Genesis=${HOME}/.gaiad/config/genesis.json \
-		-Enabled=true -NumBlocks=100 -BlockSize=200 -Commit=true -Seed=99 -Period=5 -v -timeout 24h
+	@go test $(TEST_FLAGS) -mod=readonly $(SIMAPP) -run TestFullAppSimulation -Genesis=${HOME}/.gaiad/config/genesis.json \
+		-Enabled=true -NumBlocks=100 -BlockSize=200 -Commit=true -Seed=99 -Period=5 -v -timeout 24h -ExitOnFail
 
 test-sim-import-export:
 	@echo "Running Chain import/export simulation. This may take several minutes..."
-	@$(BINDIR)/runsim -Jobs=4 -SimAppPkg=$(SIMAPP) 25 5 TestAppImportExport
+	@$(BINDIR)/runsim -Jobs=4 -SimAppPkg=$(SIMAPP) -ExitOnFail 25 5 TestAppImportExport
 
 test-sim-after-import:
 	@echo "Running application simulation-after-import. This may take several minutes..."
-	@$(BINDIR)/runsim -Jobs=4 -SimAppPkg=$(SIMAPP) 50 5 TestAppSimulationAfterImport
+	@$(BINDIR)/runsim -Jobs=4 -SimAppPkg=$(SIMAPP) -ExitOnFail 50 5 TestAppSimulationAfterImport
 
 ###############################################################################
 ###                                Localnet                                 ###
@@ -150,7 +283,55 @@ make-proto:
 ###############################################################################
 # nix installation: https://nixos.org/download.html
 nix-integration-test: check-network make-proto
-	nix run -f ./. run-integration-tests -c run-integration-tests
+	nix-shell ./integration_tests/shell.nix --run "pytest -v -m 'not upgrade and not ledger and not slow and not ibc and not byzantine and not gov and not grpc and not solomachine and not hybrid and not tieredrewards'"
+
+nix-integration-test-solomachine: check-network
+	nix-shell ./integration_tests/shell.nix --run "pytest -v -m solomachine"
+
+nix-integration-test-upgrade: check-network
+	nix-shell ./integration_tests/shell.nix --run "pytest -v -m upgrade"
+
+nix-integration-test-ledger: check-network 
+	nix-shell ./integration_tests/shell.nix --run "pytest -v -m ledger"
+
+nix-integration-test-slow: check-network
+	nix-shell ./integration_tests/shell.nix --run "pytest -v -m slow"
+
+nix-integration-test-slow-a: check-network
+	nix-shell ./integration_tests/shell.nix --run "pytest -v -m slow integration_tests/test_slashing.py integration_tests/test_tieredrewards_msgs.py"
+
+nix-integration-test-slow-b: nix-integration-test-slow-b1 nix-integration-test-slow-b2
+
+nix-integration-test-slow-b1: check-network
+	nix-shell ./integration_tests/shell.nix --run "pytest -v -m slow_b1"
+
+nix-integration-test-slow-b2: check-network
+	nix-shell ./integration_tests/shell.nix --run "pytest -v -m slow_b2"
+
+nix-integration-test-ibc: check-network
+	nix-shell ./integration_tests/shell.nix --run "pytest -v -m ibc"
+
+nix-integration-test-byzantine: check-network
+	nix-shell ./integration_tests/shell.nix --run "pytest -v -m byzantine"
+
+nix-integration-test-gov: check-network 
+	nix-shell ./integration_tests/shell.nix --run "pytest -v -m gov"
+
+nix-integration-test-inflation: check-network 
+	nix-shell ./integration_tests/shell.nix --run "pytest -v -m inflation"	
+
+nix-integration-test-base-rewards: check-network
+	nix-shell ./integration_tests/shell.nix --run "pytest -v -m base_rewards"
+
+nix-integration-test-tieredrewards: check-network
+	nix-shell ./integration_tests/shell.nix --run "pytest -v -m 'tieredrewards and not slow'"
+
+nix-integration-test-grpc: check-network make-proto
+	nix-shell ./integration_tests/shell.nix --run "pytest -v -m grpc"
+
+nix-integration-test-all: check-network make-proto
+	nix-shell ./integration_tests/shell.nix --run "pytest -v"
+
 
 nix-build-%: check-network check-os
 	@if [ -e ~/.nix/remote-build-env ]; then \
@@ -172,7 +353,7 @@ endif
 
 check-os:
 ifeq ($(OS), Darwin)
-ifneq ("$(wildcard ~/.nix/remote-build-env))","")
+ifneq ($(wildcard $(HOME)/.nix/remote-build-env),)
 	@echo "installed nix-remote-builder before" && \
 	docker run --restart always --name nix-docker -d -p 3022:22 lnl7/nix:ssh 2> /dev/null || echo "nix-docker is already running"
 else
@@ -188,30 +369,17 @@ endif
 ###############################################################################
 .PHONY: release-dry-run
 release-dry-run:
-	docker run \
-		--rm \
-		--privileged \
-		-e CGO_ENABLED=1 \
-		-v /var/run/docker.sock:/var/run/docker.sock \
-		-v `pwd`:/go/src/$(PACKAGE_NAME) \
-		-v ${GOPATH}/pkg:/go/pkg \
-		-w /go/src/$(PACKAGE_NAME) \
-		troian/golang-cross:${GOLANG_CROSS_VERSION} \
-		--rm-dist --skip-validate --skip-publish
+	./scripts/release.sh
 
-.PHONY: release
-release:
-	@if [ ! -f ".release-env" ]; then \
-		echo "\033[91m.release-env is required for release\033[0m";\
-		exit 1;\
-	fi
-	docker run \
-		--rm \
-		--privileged \
-		-e CGO_ENABLED=1 \
-		--env-file .release-env \
-		-v /var/run/docker.sock:/var/run/docker.sock \
-		-v `pwd`:/go/src/$(PACKAGE_NAME) \
-		-w /go/src/$(PACKAGE_NAME) \
-		troian/golang-cross:${GOLANG_CROSS_VERSION} \
-		release --rm-dist --skip-validate
+###############################################################################
+###                              Documentation                              ###
+###############################################################################
+
+# generate api swagger document
+document:
+	make all -f MakefileDoc
+
+# generate protobuf files
+# ./proto -> ./x
+proto-all:
+	make proto-all -f MakefileDoc

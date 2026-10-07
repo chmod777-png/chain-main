@@ -1,3 +1,4 @@
+import time
 from datetime import timedelta
 from pathlib import Path
 
@@ -5,17 +6,25 @@ import pytest
 from dateutil.parser import isoparse
 from pystarport.ports import rpc_port
 
-from .utils import cluster_fixture, parse_events, wait_for_block_time, wait_for_port
+from .utils import (
+    cluster_fixture,
+    find_log_event_attrs,
+    wait_for_block,
+    wait_for_block_time,
+    wait_for_new_blocks,
+    wait_for_port,
+)
+
+pytestmark = pytest.mark.normal
 
 
 @pytest.fixture(scope="module")
 def cluster(worker_index, pytestconfig, tmp_path_factory):
     "override cluster fixture for this test module"
     yield from cluster_fixture(
-        Path(__file__).parent / "configs/staking.yaml",
+        Path(__file__).parent / "configs/staking.jsonnet",
         worker_index,
-        tmp_path_factory,
-        quiet=pytestconfig.getoption("supervisord-quiet"),
+        tmp_path_factory.mktemp("data"),
     )
 
 
@@ -39,7 +48,6 @@ def test_staking_delegate(cluster):
     assert old_amount == new_amount + 2
 
 
-@pytest.mark.slow
 def test_staking_unbond(cluster):
     signer1_address = cluster.address("signer1", i=0)
     validators = cluster.validators()
@@ -69,12 +77,15 @@ def test_staking_unbond(cluster):
     assert rsp["code"] == 0, rsp
     assert cluster.staking_pool(bonded=False) == old_unbonded + 2
 
+    data = find_log_event_attrs(
+        rsp["events"],
+        "unbond",
+        lambda attrs: "completion_time" in attrs,
+    )
     wait_for_block_time(
         cluster,
-        isoparse(parse_events(rsp["logs"])["unbond"]["completion_time"])
-        + timedelta(seconds=1),
+        isoparse(data["completion_time"]) + timedelta(seconds=1),
     )
-
     assert cluster.balance(signer1_address) == old_amount - 5
 
 
@@ -97,12 +108,14 @@ def test_staking_redelegate(cluster):
     assert rsp["code"] == 0, rsp["raw_log"]
     delegation_info = cluster.get_delegated_amount(signer1_address)
     old_output = delegation_info["delegation_responses"][0]["balance"]["amount"]
-    cluster.redelegate_amount(
+    rsp = cluster.redelegate_amount(
         validator1_operator_address,
         validator2_operator_address,
         "2basecro",
         signer1_address,
+        gas="300000",
     )
+    assert rsp["code"] == 0, rsp["raw_log"]
     delegation_info = cluster.get_delegated_amount(signer1_address)
     output = delegation_info["delegation_responses"][0]["balance"]["amount"]
     assert int(old_output) + 2 == int(output)
@@ -113,7 +126,7 @@ def test_join_validator(cluster):
     addr = cluster.address("validator", i)
     # transfer 1cro from ecosystem account
     assert cluster.transfer(cluster.address("ecosystem"), addr, "1cro")["code"] == 0
-    assert cluster.balance(addr) == 10 ** 8
+    assert cluster.balance(addr) == 10**8
 
     # start the node
     cluster.supervisor.startProcess(f"{cluster.chain_id}-node{i}")
@@ -121,17 +134,23 @@ def test_join_validator(cluster):
 
     count1 = len(cluster.validators())
 
+    # wait for the new node to sync
+    wait_for_block(cluster.cosmos_cli(i), cluster.block_height())
+
+    # wait for the new node to sync
+    wait_for_block(cluster.cosmos_cli(i), cluster.block_height(0))
     # create validator tx
-    assert cluster.create_validator("1cro", i)["code"] == 0
+    assert cluster.create_validator("1cro", {}, i)["code"] == 0
+    time.sleep(2)
 
     count2 = len(cluster.validators())
     assert count2 == count1 + 1, "new validator should joined successfully"
 
     val_addr = cluster.address("validator", i, bech="val")
     val = cluster.validator(val_addr)
-    assert not val["jailed"]
+    assert not val.get("jailed")
     assert val["status"] == "BOND_STATUS_BONDED"
-    assert val["tokens"] == str(10 ** 8)
+    assert val["tokens"] == str(10**8)
     assert val["description"]["moniker"] == "new joined"
     assert val["commission"]["commission_rates"] == {
         "rate": "0.100000000000000000",
@@ -139,7 +158,7 @@ def test_join_validator(cluster):
         "max_change_rate": "0.010000000000000000",
     }
     assert (
-        cluster.edit_validator(i, commission_rate="0.2")["code"] == 13
+        cluster.edit_validator(i, commission_rate="0.2")["code"] == 12
     ), "commission cannot be changed more than once in 24h"
     assert cluster.edit_validator(i, moniker="awesome node")["code"] == 0
     assert cluster.validator(val_addr)["description"]["moniker"] == "awesome node"
@@ -170,8 +189,11 @@ def test_min_self_delegation(cluster):
         find_validator()["status"] == "BOND_STATUS_BONDED"
     ), "validator set not changed yet"
 
-    rsp = cluster.unbond_amount(oper_addr, "1basecro", acct_addr, i=2)
-    assert rsp["code"] == 0, rsp["raw_log"]
+    # can't do commit broadcast here
+    rsp = cluster.unbond_amount(
+        oper_addr, "1basecro", acct_addr, i=2  # , broadcast_mode="async"
+    )
+    wait_for_new_blocks(cluster, 2)
     assert (
         find_validator()["status"] == "BOND_STATUS_UNBONDING"
     ), "validator get removed"

@@ -3,24 +3,26 @@ package keeper
 import (
 	"fmt"
 
-	"github.com/tendermint/tendermint/libs/log"
+	"github.com/crypto-org-chain/chain-main/v8/x/chainmain/types"
+
+	"cosmossdk.io/log"
+	storetypes "cosmossdk.io/store/types"
 
 	"github.com/cosmos/cosmos-sdk/codec"
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	"github.com/crypto-org-chain/chain-main/v2/x/chainmain/types"
 )
 
 type (
 	// Keeper of the chainmain store
 	Keeper struct {
-		cdc      codec.BinaryMarshaler
-		storeKey sdk.StoreKey
-		memKey   sdk.StoreKey
+		cdc      codec.BinaryCodec
+		storeKey storetypes.StoreKey
+		memKey   storetypes.StoreKey
 	}
 )
 
 // NewKeeper creates a chainmain keeper
-func NewKeeper(cdc codec.BinaryMarshaler, storeKey, memKey sdk.StoreKey) *Keeper {
+func NewKeeper(cdc codec.BinaryCodec, storeKey, memKey storetypes.StoreKey) *Keeper {
 	return &Keeper{
 		cdc:      cdc,
 		storeKey: storeKey,

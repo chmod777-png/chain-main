@@ -1,24 +1,56 @@
-{ sources ? import ./sources.nix, system ? builtins.currentSystem }:
+{
+  sources ? import ./sources.nix,
+  system ? builtins.currentSystem,
+}:
 import sources.nixpkgs {
   overlays = [
-    (_: pkgs: { inherit sources; })
     (_: pkgs: {
-      cosmovisor = pkgs.buildGoModule rec {
+      flake-compat = import sources.flake-compat;
+      cosmovisor = pkgs.buildGoModule {
         name = "cosmovisor";
-        src = ../third_party/cosmos-sdk/cosmovisor;
+        src = sources.cosmos-sdk + "/tools/cosmovisor";
         subPackages = [ "./cmd/cosmovisor" ];
-        vendorSha256 = sha256:1hb9yxxm41yg21hm6qbjv53i7dr7qgdpis7y93hdibjs1apxc19q;
+        vendorHash = "sha256-f6I8q4YKF7LKw8qBDVjD/JMXfuobrg9uODEUFmer2/Y=";
         doCheck = false;
       };
-      relayer = pkgs.buildGoModule rec {
-        name = "relayer";
-        src = pkgs.sources.relayer;
-        subPackages = [ "." ];
-        vendorSha256 = sha256:0972hsxis4hvka3qjhkbnhp84a2l8mifrmaxi72amwqbsmmwfyv9;
-        doCheck = false;
+      hermes = pkgs.callPackage ./hermes.nix { src = sources.hermes; };
+      solomachine = pkgs.callPackage ./solomachine.nix { };
+    })
+    (import "${sources.poetry2nix}/overlay.nix")
+    (
+      final: prev:
+      let
+        gomodSrc = sources.gomod2nix;
+        callPackage = final.callPackage;
+        gomodBuilder = callPackage "${gomodSrc}/builder" { };
+      in
+      {
+        inherit (gomodBuilder) buildGoApplication mkGoEnv mkVendorEnv;
+        gomod2nix = (callPackage "${gomodSrc}/default.nix" { }).overrideAttrs (_: {
+          modRoot = ".";
+        });
+      }
+    )
+    (import ./build_overlay.nix)
+    (pkgs: prev: {
+      go = pkgs.go_1_25;
+      test-env = pkgs.callPackage ./testenv.nix { };
+      lint-ci = pkgs.writeShellScriptBin "lint-ci" ''
+        EXIT_STATUS=0
+        ${pkgs.go}/bin/go mod verify || EXIT_STATUS=$?
+        ${pkgs.test-env}/bin/flake8 --show-source --count --statistics \
+          --format="::error file=%(path)s,line=%(row)d,col=%(col)d::%(path)s:%(row)d:%(col)d: %(code)s %(text)s" \
+          || EXIT_STATUS=$?
+        find . -name "*.nix" -type f | xargs ${pkgs.nixfmt-rfc-style}/bin/nixfmt -c || EXIT_STATUS=$?
+        exit $EXIT_STATUS
+      '';
+      chain-maind-zemu = pkgs.callPackage ../. { ledger_zemu = true; };
+      # chain-maind for integration test
+      chain-maind-test = pkgs.callPackage ../. {
+        ledger_zemu = true;
+        coverage = true;
       };
     })
-    (import (sources.gomod2nix + "/overlay.nix"))
   ];
   config = { };
   inherit system;

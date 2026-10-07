@@ -22,10 +22,9 @@ slashing testing
 def cluster(worker_index, pytestconfig, tmp_path_factory):
     "override cluster fixture for this test module"
     yield from cluster_fixture(
-        Path(__file__).parent / "configs/slashing.yaml",
+        Path(__file__).parent / "configs/slashing.jsonnet",
         worker_index,
-        tmp_path_factory,
-        quiet=pytestconfig.getoption("supervisord-quiet"),
+        tmp_path_factory.mktemp("data"),
     )
 
 
@@ -48,7 +47,7 @@ def test_slashing(cluster):
     print("tokens after slashing", tokens2)
     assert tokens2 == int(tokens1 * 0.99), "slash amount is not correct"
 
-    assert val["jailed"], "validator is jailed"
+    assert val.get("jailed"), "validator is jailed"
 
     # try to unjail
     rsp = cluster.unjail(addr, i=2)

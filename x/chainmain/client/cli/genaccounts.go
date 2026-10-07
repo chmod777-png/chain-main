@@ -12,7 +12,6 @@ import (
 
 	"github.com/cosmos/cosmos-sdk/client"
 	"github.com/cosmos/cosmos-sdk/client/flags"
-	"github.com/cosmos/cosmos-sdk/codec"
 	"github.com/cosmos/cosmos-sdk/crypto/keyring"
 	"github.com/cosmos/cosmos-sdk/server"
 	sdk "github.com/cosmos/cosmos-sdk/types"
@@ -42,8 +41,8 @@ contain valid denominations. Accounts may optionally be supplied with vesting pa
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			clientCtx := client.GetClientContextFromCmd(cmd)
-			depCdc := clientCtx.JSONMarshaler
-			cdc := depCdc.(codec.Marshaler)
+			depCdc := clientCtx.Codec
+			cdc := depCdc
 
 			serverCtx := server.GetServerContextFromCmd(cmd)
 			config := serverCtx.Config
@@ -59,8 +58,7 @@ contain valid denominations. Accounts may optionally be supplied with vesting pa
 				}
 
 				// attempt to lookup address from Keybase if no address was provided
-				// nolint: govet
-				kb, err := keyring.New(sdk.KeyringServiceName(), keyringBackend, clientCtx.HomeDir, inBuf)
+				kb, err := keyring.New(sdk.KeyringServiceName(), keyringBackend, clientCtx.HomeDir, inBuf, clientCtx.Codec)
 				if err != nil {
 					return err
 				}
@@ -70,7 +68,10 @@ contain valid denominations. Accounts may optionally be supplied with vesting pa
 					return fmt.Errorf("failed to get address from Keybase: %w", err)
 				}
 
-				addr = info.GetAddress()
+				addr, err = info.GetAddress()
+				if err != nil {
+					return fmt.Errorf("failed to get address from Keybase: %w", err)
+				}
 			}
 
 			coins, err := sdk.ParseCoinsNormalized(args[1])
@@ -124,8 +125,10 @@ contain valid denominations. Accounts may optionally be supplied with vesting pa
 			baseAccount := authtypes.NewBaseAccount(addr, nil, 0, 0)
 
 			if !vestingAmt.IsZero() {
-				baseVestingAccount := authvesting.NewBaseVestingAccount(baseAccount, vestingAmt.Sort(), vestingEnd)
-
+				baseVestingAccount, err := authvesting.NewBaseVestingAccount(baseAccount, vestingAmt.Sort(), vestingEnd)
+				if err != nil {
+					return fmt.Errorf("failed to create base vesting account: %w", err)
+				}
 				if (balances.Coins.IsZero() && !baseVestingAccount.OriginalVesting.IsZero()) ||
 					baseVestingAccount.OriginalVesting.IsAnyGT(balances.Coins) {
 					return errors.New("vesting amount cannot be greater than total amount")
@@ -145,7 +148,6 @@ contain valid denominations. Accounts may optionally be supplied with vesting pa
 				genAccount = baseAccount
 			}
 
-			// nolint: govet
 			if err := genAccount.Validate(); err != nil {
 				return fmt.Errorf("failed to validate new genesis account: %w", err)
 			}
@@ -158,7 +160,6 @@ contain valid denominations. Accounts may optionally be supplied with vesting pa
 
 			authGenState := authtypes.GetGenesisStateFromAppState(cdc, appState)
 
-			// nolint: govet
 			accs, err := authtypes.UnpackAccounts(authGenState.Accounts)
 			if err != nil {
 				return fmt.Errorf("failed to get accounts from any: %w", err)
@@ -173,7 +174,6 @@ contain valid denominations. Accounts may optionally be supplied with vesting pa
 			accs = append(accs, genAccount)
 			accs = authtypes.SanitizeGenesisAccounts(accs)
 
-			// nolint: govet
 			genAccs, err := authtypes.PackAccounts(accs)
 			if err != nil {
 				return fmt.Errorf("failed to convert accounts into any's: %w", err)
@@ -191,7 +191,6 @@ contain valid denominations. Accounts may optionally be supplied with vesting pa
 			bankGenState.Balances = append(bankGenState.Balances, balances)
 			bankGenState.Balances = banktypes.SanitizeGenesisBalances(bankGenState.Balances)
 
-			// nolint: govet
 			bankGenStateBz, err := cdc.MarshalJSON(bankGenState)
 			if err != nil {
 				return fmt.Errorf("failed to marshal bank genesis state: %w", err)
@@ -199,7 +198,6 @@ contain valid denominations. Accounts may optionally be supplied with vesting pa
 
 			appState[banktypes.ModuleName] = bankGenStateBz
 
-			// nolint: govet
 			appStateJSON, err := json.Marshal(appState)
 			if err != nil {
 				return fmt.Errorf("failed to marshal application genesis state: %w", err)

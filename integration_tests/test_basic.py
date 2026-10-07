@@ -1,6 +1,10 @@
-import time
+import pytest
+import requests
+from pystarport.ports import api_port
 
-from .utils import wait_for_block
+from .utils import find_log_event_attrs, wait_for_block
+
+pytestmark = pytest.mark.normal
 
 
 def test_simple(cluster):
@@ -12,9 +16,9 @@ def test_simple(cluster):
 
     # check vesting account
     addr = cluster.address("reserve")
-    account = cluster.account(addr)
-    assert account["@type"] == "/cosmos.vesting.v1beta1.DelayedVestingAccount"
-    assert account["base_vesting_account"]["original_vesting"] == [
+    account = cluster.account(addr)["account"]
+    assert account["type"] == "cosmos-sdk/DelayedVestingAccount"
+    assert account["value"]["base_vesting_account"]["original_vesting"] == [
         {"denom": "basecro", "amount": "20000000000"}
     ]
 
@@ -26,43 +30,66 @@ def test_transfer(cluster):
     """
     community_addr = cluster.address("community")
     reserve_addr = cluster.address("reserve")
-
     community_balance = cluster.balance(community_addr)
     reserve_balance = cluster.balance(reserve_addr)
+    initial_community_addr_tx_count = len(cluster.query_all_txs(community_addr)["txs"])
+    initial_reserve_addr_tx_count = len(cluster.query_all_txs(reserve_addr)["txs"])
 
-    tx = cluster.transfer(community_addr, reserve_addr, "1cro")
-    print("transfer tx", tx["txhash"])
-    assert tx["logs"] == [
-        {
-            "events": [
-                {
-                    "attributes": [
-                        {"key": "action", "value": "send"},
-                        {"key": "sender", "value": community_addr},
-                        {"key": "module", "value": "bank"},
-                    ],
-                    "type": "message",
-                },
-                {
-                    "attributes": [
-                        {"key": "recipient", "value": reserve_addr},
-                        {"key": "sender", "value": community_addr},
-                        {"key": "amount", "value": "100000000basecro"},
-                    ],
-                    "type": "transfer",
-                },
-            ],
-            "log": "",
-            "msg_index": 0,
-        }
-    ]
+    rsp = cluster.transfer(community_addr, reserve_addr, "1cro")
+    ev = find_log_event_attrs(rsp["events"], "message")
+    assert ev == {
+        "action": "/cosmos.bank.v1beta1.MsgSend",
+        "sender": community_addr,
+        "module": "bank",
+        "msg_index": "0",
+    }, ev
+    ev = find_log_event_attrs(rsp["events"], "coin_spent")
+    assert ev == {
+        "spender": community_addr,
+        "amount": "100000000basecro",
+        "msg_index": "0",
+    }, ev
+    ev = find_log_event_attrs(rsp["events"], "coin_received")
+    assert ev == {
+        "receiver": reserve_addr,
+        "amount": "100000000basecro",
+        "msg_index": "0",
+    }, ev
+    ev = find_log_event_attrs(rsp["events"], "transfer")
+    assert ev == {
+        "recipient": reserve_addr,
+        "sender": community_addr,
+        "amount": "100000000basecro",
+        "msg_index": "0",
+    }, ev
+    ev = find_log_event_attrs(
+        rsp["events"],
+        "message",
+        lambda attrs: "action" not in attrs,
+    )
+    assert ev == {
+        "sender": community_addr,
+        "msg_index": "0",
+    }, ev
 
     assert cluster.balance(community_addr) == community_balance - 100000000
     assert cluster.balance(reserve_addr) == reserve_balance + 100000000
-    query_txs_1 = cluster.query_all_txs(community_addr)
-    assert len(query_txs_1["txs"]) == 1
-    query_txs_2 = cluster.query_all_txs(reserve_addr)
-    assert len(query_txs_2["txs"]) == 1
+    updated_community_addr_tx_count = len(cluster.query_all_txs(community_addr)["txs"])
+    assert updated_community_addr_tx_count == initial_community_addr_tx_count + 1
+    updated_reserve_addr_tx_count = len(cluster.query_all_txs(reserve_addr)["txs"])
+    assert updated_reserve_addr_tx_count == initial_reserve_addr_tx_count + 1
+
+    # the tx emits message.sender twice; search must count and return it once
+    url = f"http://127.0.0.1:{api_port(cluster.base_port(0))}/cosmos/tx/v1beta1/txs"
+    query = f"message.sender='{community_addr}'"
+    all_txs = requests.get(url, params={"query": query, "limit": 100}).json()
+    hashes = [tx["txhash"] for tx in all_txs["tx_responses"]]
+    assert len(hashes) == len(set(hashes)) == int(all_txs["total"])
+    newest = requests.get(
+        url, params={"query": query, "limit": 1, "order_by": "ORDER_BY_DESC"}
+    ).json()
+    assert newest["total"] == all_txs["total"]
+    assert newest["tx_responses"][0]["txhash"] == rsp["txhash"]
 
 
 def test_liquid_supply(cluster):
@@ -72,6 +99,7 @@ def test_liquid_supply(cluster):
 
     liquid_supply = cluster.supply("liquid")["supply"]
     assert liquid_supply[0]["denom"] == "basecro"
+    # # sum of all coins except the one with vesting time under accounts in config yaml
     assert liquid_supply[0]["amount"] == "1640000000000"
 
 
@@ -88,5 +116,5 @@ def test_statesync(cluster):
     cluster.supervisor.startProcess(f"{cluster.chain_id}-node{i}")
 
     # discovery_time is set to 5 seconds, add extra seconds for processing
-    time.sleep(5 + 5)
-    assert cluster.block_height(i=i) >= 5, "syncing"
+    wait_for_block(cluster.cosmos_cli(i), 10)
+    print("successfully syncing")

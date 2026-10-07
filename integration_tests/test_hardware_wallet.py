@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from .utils import cluster_fixture, get_ledger
+from .utils import cluster_fixture, find_log_event_attrs, get_ledger
 
 pytestmark = pytest.mark.ledger
 
@@ -15,10 +15,9 @@ def cluster(worker_index, pytestconfig, tmp_path_factory):
     ledger.start()
     try:
         yield from cluster_fixture(
-            Path(__file__).parent / "configs/ledger.yaml",
+            Path(__file__).parent / "configs/ledger.jsonnet",
             worker_index,
-            tmp_path_factory,
-            quiet=pytestconfig.getoption("supervisord-quiet"),
+            tmp_path_factory.mktemp("data"),
         )
     finally:
         ledger.stop()
@@ -35,33 +34,34 @@ def test_ledger_transfer(cluster):
     reserve_balance = cluster.balance(reserve_addr)
     hw_balance = cluster.balance(hw_addr)
 
-    tx = cluster.transfer_from_ledger("hw", reserve_addr, "1cro")
-    print("transfer tx", tx["txhash"])
-    assert tx["logs"] == [
-        {
-            "events": [
-                {
-                    "attributes": [
-                        {"key": "action", "value": "send"},
-                        {"key": "sender", "value": hw_addr},
-                        {"key": "module", "value": "bank"},
-                    ],
-                    "type": "message",
-                },
-                {
-                    "attributes": [
-                        {"key": "recipient", "value": reserve_addr},
-                        {"key": "sender", "value": hw_addr},
-                        {"key": "amount", "value": "100000000basecro"},
-                    ],
-                    "type": "transfer",
-                },
-            ],
-            "log": "",
-            "msg_index": 0,
-        }
-    ]
-
+    rsp = cluster.transfer_from_ledger("hw", reserve_addr, "1cro")
+    print("transfer tx", rsp["txhash"])
+    ev = find_log_event_attrs(rsp["events"], "message")
+    assert ev == {
+        "action": "/cosmos.bank.v1beta1.MsgSend",
+        "sender": hw_addr,
+        "module": "bank",
+        "msg_index": "0",
+    }, ev
+    ev = find_log_event_attrs(rsp["events"], "coin_spent")
+    assert ev == {
+        "spender": hw_addr,
+        "amount": "100000000basecro",
+        "msg_index": "0",
+    }, ev
+    ev = find_log_event_attrs(rsp["events"], "coin_received")
+    assert ev == {
+        "receiver": reserve_addr,
+        "amount": "100000000basecro",
+        "msg_index": "0",
+    }, ev
+    ev = find_log_event_attrs(rsp["events"], "transfer")
+    assert ev == {
+        "recipient": reserve_addr,
+        "sender": hw_addr,
+        "amount": "100000000basecro",
+        "msg_index": "0",
+    }, ev
     assert cluster.balance(hw_addr) == hw_balance - 100000000
     assert cluster.balance(reserve_addr) == reserve_balance + 100000000
 
